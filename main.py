@@ -16,18 +16,36 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 API_URL = os.getenv("API_URL", "http://localhost:8000/tasks/")
 
-# --- CONFIGURATION FROM SHEET ---
-VALID_OFFICERS = [
-    "AC Tribal", "Aditya DMF", "Alka DMF", "All CEOs", "All CEOs + LDM", "Amit Skill", 
-    "APO Tarun", "APO NREGA", "BC PMAY Geedam", "CEO JP Dantewada", "CEO JP Geedam", 
-    "CEO JP Katekalyan", "CEO JP Kuakonda", "CMHO", "CMO Dantewada", "CS Abhay", "CSEB", 
-    "CSSDA", "DC PMAY", "DC SBM Mamta", "DD Agri", "DD Vet", "DD Fisheries", "DD Social Welfare", 
-    "DDP", "DDP + CEO JP Dante", "DEO", "Divya PPIA", "DMC", "DPM Livelihood", "DPM MIS", 
-    "DPM NRLM", "DPM SMIB", "DPO WCD", "EDM", "EE PWD", "EE RES", "EE RES and Vineet Te", 
-    "Korram Steno", "LDM and EDM", "Me", "Others", "PO Manoj", "PMGSY", "Pradeep Sports", 
-    "Praneeth", "Principal Livelihood", "PWD EnM", "PWD SDO Ram", "Sachivs", "SDM Geedam", 
-    "SDMs", "Sudama", "APO Niramn"
-]
+# --- DYNAMIC CONFIGURATION ---
+def fetch_valid_officers():
+    try:
+        # Derive employee URL from Tasks API URL (replace endpoint)
+        # API_URL is default "http://localhost:8000/tasks/"
+        # We need "http://localhost:8000/api/employees/"
+        # Note: In main.py of backend, prefix is "/api/tasks" and "/api/employees"
+        # If env API_URL includes full path, we need to be careful.
+        
+        # Safer approach: construct base from env or assumption
+        base_url = API_URL.rsplit('/', 2)[0] # http://localhost:8000/api
+        if not base_url.endswith("/api"):
+             # Fallback logic if API_URL format is different
+             base_url = "http://localhost:8000/api"
+        
+        emp_url = f"{base_url}/employees/"
+        logging.info(f"Fetching officers from {emp_url}")
+        
+        response = requests.get(emp_url, timeout=4)
+        if response.status_code == 200:
+            employees = response.json()
+            names = [e['display_name'] for e in employees]
+            if names:
+                return names
+    except Exception as e:
+        logging.error(f"Failed to fetch employees: {e}")
+    
+    # Fallback to basic list if API fails
+    return ["Me", "Others"]
+
 
 
 # Configure Logging
@@ -70,11 +88,13 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         today_str = datetime.date.today().strftime("%Y-%m-%d")
         year_str = datetime.date.today().year
 
+        valid_officers = fetch_valid_officers()
+        
         prompt = f"""
         Listen to this audio command. Today is {today_str}.
         
         VALID OFFICERS LIST:
-        {json.dumps(VALID_OFFICERS)}
+        {json.dumps(valid_officers)}
 
         Extract the following details into a JSON object:
         - description: The full task description.
@@ -166,11 +186,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         today_str = datetime.date.today().strftime("%Y-%m-%d")
         year_str = datetime.date.today().year
+        valid_officers = fetch_valid_officers()
+
         prompt = f"""
         You are a smart Task Extractor. Today is {today_str} (Year {year_str}).
         
         VALID OFFICERS LIST:
-        {json.dumps(VALID_OFFICERS)}
+        {json.dumps(valid_officers)}
         
         Analyze this command: "{text_content}"
         
