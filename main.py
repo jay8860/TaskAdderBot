@@ -121,7 +121,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         Extract the following details into a JSON object:
         - description: The full task description.
-        - assigned_agency: The agency or person assigned (e.g., PWD, RES, Engineer Name). If not specified, null.
+        - assigned_agency: The agency or person assigned. 
+          * If user says "me", "myself", "self" -> set as "District Collector".
+          * Otherwise extract name/agency (e.g. PWD, RES). If not specified, null.
         - deadline_date: The deadline date in YYYY-MM-DD format. 
           * CRITICAL: If audio says "today", use {today_str}. 
           * If "tomorrow", use date+1. 
@@ -146,15 +148,23 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # --- DATA MAPPING CORRECTION ---
         # User wants the Task Description in "Task/File No" column (task_number).
-        # Removed random suffix as per user request.
-        
-        # Main Task goes to task_number
         task_data['task_number'] = task_data.get('description', 'Task')
         
-        # Description field (Col 4) can be a fallback or same
-        task_data['description'] = "Voice Entry"
+        # Description field (Col 4 - Notes) must be EMPTY as per user request
+        task_data['description'] = ""
+        
         task_data['source'] = "VoiceBot"
         task_data['allocated_date'] = today_str
+        
+        # Calculate 'time_given' for the Sheet (Col 9)
+        if task_data.get('deadline_date'):
+            try:
+                d1 = datetime.datetime.strptime(today_str, "%Y-%m-%d").date()
+                d2 = datetime.datetime.strptime(task_data['deadline_date'], "%Y-%m-%d").date()
+                delta = (d2 - d1).days
+                task_data['time_given'] = str(delta)
+            except:
+                task_data['time_given'] = ""
         
         # Push to API
         response = requests.post(API_URL, json=task_data)
