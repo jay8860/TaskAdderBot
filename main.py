@@ -211,6 +211,7 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         - description: The full task description.
         - assigned_agency: The agency or person assigned (Fuzzy Match against LIST).
           * Rule: Name -> Display Name mapping.
+          * CRITICAL: If the person to assign the task to is not clear, not mentioned, or ambiguous, assign it to "Steno" by default.
         - deadline_date: YYYY-MM-DD. (Default to null if not clear).
         - priority: High/Medium/Low.
         
@@ -312,6 +313,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         - description: The full task description.
         - assigned_agency: The agency or person assigned (Fuzzy Match against LIST).
           * Rule: Name -> Display Name mapping.
+          * CRITICAL: If the person to assign the task to is not clear, not mentioned, or ambiguous, assign it to "Steno" by default.
         - deadline_date: YYYY-MM-DD. (Default to null).
         - priority: High/Medium/Low.
         
