@@ -37,13 +37,23 @@ def fetch_valid_officers():
         response = requests.get(emp_url, timeout=4)
         if response.status_code == 200:
             employees = response.json()
-            names = [e['display_name'] for e in employees]
-            if names:
-                return names
+            # Format: "Name -> Display Name" to provide context
+            # e.g. "Amit Verma -> AD CSSDA"
+            mapping = []
+            for e in employees:
+                name = e.get('name', '').strip()
+                disp = e.get('display_name', '').strip()
+                if name and disp:
+                     mapping.append(f"{name} -> {disp}")
+                elif disp:
+                     mapping.append(disp)
+            
+            if mapping:
+                return mapping
     except Exception as e:
         logging.error(f"Failed to fetch employees: {e}")
     
-    # Fallback to basic list if API fails
+    # Fallback
     return ["Me", "Others"]
 
 
@@ -100,9 +110,11 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         - description: The full task description.
         - assigned_agency: The agency or person assigned. 
           * MATCHING RULE: strict fuzzy match against VALID OFFICERS LIST.
-          * Example: "Aditya" -> "Aditya DMF", "Meena Horti" -> "DD Horti" (if relatable).
+          * The List contains "Name -> Display Name" mappings.
+          * IF user says a Name (e.g. "Amit Verma") and it matches the LEFT side of a mapping, use the RIGHT side (Display Name) as the value.
+          * Example: List has "Amit Verma -> AD CSSDA". User says "Amit Verma". Result: "AD CSSDA".
+          * Example: List has "Aditya -> Aditya DMF". User says "Aditya". Result: "Aditya DMF".
           * If user says "me", "myself" -> "Me".
-          * If the name sounds similar to a valid officer, use the valid officer name.
           * If NO match found, use the name exactly as spoken.
           * If not specified, null.
         - deadline_date: The deadline date in YYYY-MM-DD format. 
@@ -200,9 +212,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         - description: The full task description.
         - assigned_agency: The agency or person assigned. 
           * MATCHING RULE: strict fuzzy match against VALID OFFICERS LIST.
-          * Example: "Aditya" -> "Aditya DMF", "Meena Horti" -> "DD Horti" (if relatable).
+          * The List contains "Name -> Display Name" mappings.
+          * IF user text has a Name (e.g. "Amit Verma") and it matches the LEFT side of a mapping, use the RIGHT side (Display Name) as the value.
+          * Example: List has "Amit Verma -> AD CSSDA". User says "Amit Verma". Result: "AD CSSDA".
           * If user says "me", "myself" -> "Me".
-          * If the name sounds similar to a valid officer, use the valid officer name.
           * If NO match found, use the name exactly as written.
           * If not specified, null.
         - deadline_date: The deadline date in YYYY-MM-DD format. 
