@@ -189,7 +189,11 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         {json.dumps(valid_officers_prompt)}
 
         INSTRUCTION:
-        This audio may contain one or multiple tasks. Segregate them.
+        This audio may contain one or multiple tasks.
+        CRITICAL SPLITTING RULE:
+        - Only split into multiple tasks if the user explicitly uses the word "Next" (e.g., "Next", "Next task", "Next one").
+        - Do NOT split on "and" (e.g. "Repair the road and fix the light" should be ONE task unless "Next" is used).
+        - Treat "and" as a connector within a single task description.
         
         Extract the details into a JSON LIST of objects.
         Each object in the list must have:
@@ -279,7 +283,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         VALID OFFICERS LIST:
         {json.dumps(valid_officers_prompt)}
         
-        IMPORTANT: This text may contain MULTIPLE tasks. Separate them.
+        INSTRUCTION:
+        This text may contain one or multiple tasks.
+        CRITICAL SPLITTING RULE:
+        - Only split into multiple tasks if the user explicitly uses the word "Next" (e.g., "Next", "Next task", "Next one").
+        - Do NOT split on "and".
+        - Treat "and" as a connector within a single task description.
+
         Analyze this command: "{text_content}"
         
         Extract the details into a JSON LIST of objects.
