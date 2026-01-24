@@ -113,13 +113,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✍️ Processing your text...")
 
     try:
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
         prompt = f"""
-        Analyze this task command: "{text_content}"
+        You are a smart Task Extractor. Today is {today_str}.
+        
+        Analyze this command: "{text_content}"
         
         Extract the following details into a JSON object:
         - description: The full task description.
         - assigned_agency: The agency or person assigned (e.g., PWD, RES, Engineer Name). If not specified, null.
-        - deadline_date: The deadline date in YYYY-MM-DD format. Calculate based on context (e.g., "next Friday", "today"). If not specified, null.
+        - deadline_date: The deadline date in YYYY-MM-DD format. 
+          * CRITICAL: If audio says "today", use {today_str}. 
+          * If "tomorrow", use date+1. 
+          * If "next week", use date+7. 
+          * Do NOT default to a week if not specified. default to null.
         - priority: High, Medium, or Low. Infer from urgency.
         
         Return ONLY the JSON.
@@ -137,9 +144,19 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task_data = json.loads(response_text)
         logging.info(f"Extracted Data: {task_data}")
         
-        # Create Task ID
-        task_data['task_number'] = f"TEXT-{int(datetime.datetime.now().timestamp())}"
+        # --- DATA MAPPING CORRECTION ---
+        # User wants the Task Description in "Task/File No" column (task_number).
+        # We append a short random ID to ensure uniqueness in DB.
+        import random
+        short_id = str(random.randint(1000, 9999))
+        
+        # Main Task goes to task_number
+        task_data['task_number'] = f"{task_data.get('description', 'Task')} ({short_id})"
+        
+        # Description field (Col 4) can be a fallback or same
+        task_data['description'] = "Voice Entry"
         task_data['source'] = "VoiceBot"
+        task_data['allocated_date'] = today_str
         
         # Push to API
         response = requests.post(API_URL, json=task_data)
@@ -148,11 +165,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Success
             created_task = response.json()
             reply = (
-                f"✅ **Task Created Successfully!**\n\n"
-                f"🆔 `{created_task.get('task_number')}`\n"
-                f"📝 {created_task.get('description')}\n"
-                f"👤 {created_task.get('assigned_agency') or 'Unassigned'}\n"
-                f"📅 {created_task.get('deadline_date') or 'No Deadline'}"
+                f"✅ **Task Created!**\n\n"
+                f"📝 **Task:** {task_data.get('task_number')}\n"
+                f"👤 **Assigned:** {created_task.get('assigned_agency') or 'Unassigned'}\n"
+                f"📅 **Deadline:** {created_task.get('deadline_date') or 'No Deadline'}"
             )
             await update.message.reply_text(reply, parse_mode='Markdown')
         else:
