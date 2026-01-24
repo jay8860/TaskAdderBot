@@ -183,30 +183,23 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         valid_officers_prompt = get_officer_prompt_list(raw_officers)
         
         prompt = f"""
-        Listen to this audio command. Today is {today_str}.
+        Listen to this audio command. Today is {today_str}. (Year {year_str})
         
         VALID OFFICERS LIST:
         {json.dumps(valid_officers_prompt)}
 
-        Extract the following details into a JSON object:
-        - description: The full task description.
-        - assigned_agency: The agency or person assigned. 
-          * MATCHING RULE: strict fuzzy match against VALID OFFICERS LIST.
-          * The List contains "Name -> Display Name" mappings.
-          * IF user says a Name (e.g. "Amit Verma") and it matches the LEFT side of a mapping, use the RIGHT side (Display Name) as the value.
-          * Example: List has "Amit Verma -> AD CSSDA". User says "Amit Verma". Result: "AD CSSDA".
-          * Example: List has "Aditya -> Aditya DMF". User says "Aditya". Result: "Aditya DMF".
-          * If user says "me", "myself" -> "Me".
-          * If NO match found, use the name exactly as spoken.
-          * If not specified, null.
-        - deadline_date: The deadline date in YYYY-MM-DD format. 
-          * Calculate based on context (e.g., "next Friday"). 
-          * CRITICAL: Assume year is {year_str} unless explicitly stated otherwise.
-          * If "tomorrow", use date+1.
-          * If not specified, null.
-        - priority: High, Medium, or Low. Infer from urgency.
+        INSTRUCTION:
+        This audio may contain one or multiple tasks. Segregate them.
         
-        Return ONLY the JSON.
+        Extract the details into a JSON LIST of objects.
+        Each object in the list must have:
+        - description: The full task description.
+        - assigned_agency: The agency or person assigned (Fuzzy Match against LIST).
+          * Rule: Name -> Display Name mapping.
+        - deadline_date: YYYY-MM-DD. (Default to null if not clear).
+        - priority: High/Medium/Low.
+        
+        Return ONLY the JSON LIST. Example: [{{...}}, {{...}}]
         """
         
         result = model.generate_content([myfile, prompt])
@@ -217,31 +210,48 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif response_text.startswith("```"):
             response_text = response_text[3:-3].strip()
             
-        task_data = json.loads(response_text)
-        logging.info(f"Extracted Data: {task_data}")
+        data_extracted = json.loads(response_text)
+        logging.info(f"Extracted Data: {data_extracted}")
         
-        # Mapping Correction
-        task_data['task_number'] = task_data.get('description', 'Voice Task')
-        task_data['description'] = ""
-        task_data['source'] = "VoiceBot"
-        task_data['allocated_date'] = today_str
-        
-        d1 = datetime.datetime.strptime(today_str, "%Y-%m-%d").date()
-        if task_data.get('deadline_date'):
-            try:
-                d2 = datetime.datetime.strptime(task_data['deadline_date'], "%Y-%m-%d").date()
-                delta = (d2 - d1).days
-                task_data['time_given'] = str(delta)
-            except:
-                task_data['time_given'] = "7"
+        # Normalize to list
+        if isinstance(data_extracted, dict):
+            task_list = [data_extracted]
+        elif isinstance(data_extracted, list):
+            task_list = data_extracted
         else:
-            task_data['time_given'] = "7"
-            d2 = d1 + datetime.timedelta(days=7)
-            task_data['deadline_date'] = d2.strftime("%Y-%m-%d")
-        
-        # Process and Notify
-        await process_task_creation(update, task_data, raw_officers)
-        
+            task_list = []
+            
+        if not task_list:
+            await update.message.reply_text("⚠️ I couldn't understand any tasks from that.")
+            return
+
+        await update.message.reply_text(f"🔍 Found {len(task_list)} task(s). Processing...")
+
+        for i, task_data in enumerate(task_list):
+            # Mapping Correction per Task
+            task_data['task_number'] = task_data.get('description', f'Voice Task {i+1}')
+            task_data['description'] = ""
+            task_data['source'] = "VoiceBot"
+            task_data['allocated_date'] = today_str
+            
+            d1 = datetime.datetime.strptime(today_str, "%Y-%m-%d").date()
+            if task_data.get('deadline_date'):
+                try:
+                    d2 = datetime.datetime.strptime(task_data['deadline_date'], "%Y-%m-%d").date()
+                    delta = (d2 - d1).days
+                    task_data['time_given'] = str(delta)
+                except:
+                    task_data['time_given'] = "7"
+            else:
+                task_data['time_given'] = "7"
+                d2 = d1 + datetime.timedelta(days=7)
+                task_data['deadline_date'] = d2.strftime("%Y-%m-%d")
+            
+            # Process and Notify
+            await process_task_creation(update, task_data, raw_officers)
+            # Small delay to avoid message flood/order issues
+            await asyncio.sleep(1)
+
     except Exception as e:
         logging.error(f"Error processing voice: {e}")
         await update.message.reply_text(f"❌ Error processing voice: {str(e)}")
@@ -269,28 +279,18 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         VALID OFFICERS LIST:
         {json.dumps(valid_officers_prompt)}
         
+        IMPORTANT: This text may contain MULTIPLE tasks. Separate them.
         Analyze this command: "{text_content}"
         
-        Extract the following details into a JSON object:
+        Extract the details into a JSON LIST of objects.
+        Each object in the list must have:
         - description: The full task description.
-        - assigned_agency: The agency or person assigned. 
-          * MATCHING RULE: strict fuzzy match against VALID OFFICERS LIST.
-          * The List contains "Name -> Display Name" mappings.
-          * IF user text has a Name (e.g. "Amit Verma") and it matches the LEFT side of a mapping, use the RIGHT side (Display Name) as the value.
-          * Example: List has "Amit Verma -> AD CSSDA". User says "Amit Verma". Result: "AD CSSDA".
-          * If user says "me", "myself" -> "Me".
-          * If NO match found, use the name exactly as written.
-          * If not specified, null.
-        - deadline_date: The deadline date in YYYY-MM-DD format. 
-          * CRITICAL: Start with the year {year_str}.
-          * If audio says "today", use {today_str}. 
-          * If "tomorrow", use date+1. 
-          * If "next week", use date+7. 
-          * If month is mentioned (e.g., "August 24"), assume {year_str} unless a different year is explicitly said.
-          * Do NOT default to a week if not specified. Default to null.
-        - priority: High, Medium, or Low. Infer from urgency.
+        - assigned_agency: The agency or person assigned (Fuzzy Match against LIST).
+          * Rule: Name -> Display Name mapping.
+        - deadline_date: YYYY-MM-DD. (Default to null).
+        - priority: High/Medium/Low.
         
-        Return ONLY the JSON.
+        Return ONLY the JSON LIST. Example: [{{...}}, {{...}}]
         """
         
         result = model.generate_content(prompt)
@@ -301,28 +301,44 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif response_text.startswith("```"):
             response_text = response_text[3:-3].strip()
             
-        task_data = json.loads(response_text)
-        logging.info(f"Extracted Data: {task_data}")
+        data_extracted = json.loads(response_text)
+        logging.info(f"Extracted Data: {data_extracted}")
         
-        task_data['task_number'] = task_data.get('description', 'Task')
-        task_data['description'] = ""
-        task_data['source'] = "VoiceBot"
-        task_data['allocated_date'] = today_str
-        
-        d1 = datetime.datetime.strptime(today_str, "%Y-%m-%d").date()
-        if task_data.get('deadline_date'):
-            try:
-                d2 = datetime.datetime.strptime(task_data['deadline_date'], "%Y-%m-%d").date()
-                delta = (d2 - d1).days
-                task_data['time_given'] = str(delta)
-            except:
-                task_data['time_given'] = "7"
+        # Normalize to list
+        if isinstance(data_extracted, dict):
+            task_list = [data_extracted]
+        elif isinstance(data_extracted, list):
+            task_list = data_extracted
         else:
-            task_data['time_given'] = "7"
-            d2 = d1 + datetime.timedelta(days=7)
-            task_data['deadline_date'] = d2.strftime("%Y-%m-%d")
-        
-        await process_task_creation(update, task_data, raw_officers)
+            task_list = []
+            
+        if not task_list:
+             await update.message.reply_text("⚠️ I couldn't understand any tasks from that.")
+             return
+
+        await update.message.reply_text(f"🔍 Found {len(task_list)} task(s). Processing...")
+
+        for i, task_data in enumerate(task_list):
+            task_data['task_number'] = task_data.get('description', f'Task {i+1}')
+            task_data['description'] = ""
+            task_data['source'] = "VoiceBot"
+            task_data['allocated_date'] = today_str
+            
+            d1 = datetime.datetime.strptime(today_str, "%Y-%m-%d").date()
+            if task_data.get('deadline_date'):
+                try:
+                    d2 = datetime.datetime.strptime(task_data['deadline_date'], "%Y-%m-%d").date()
+                    delta = (d2 - d1).days
+                    task_data['time_given'] = str(delta)
+                except:
+                    task_data['time_given'] = "7"
+            else:
+                task_data['time_given'] = "7"
+                d2 = d1 + datetime.timedelta(days=7)
+                task_data['deadline_date'] = d2.strftime("%Y-%m-%d")
+            
+            await process_task_creation(update, task_data, raw_officers)
+            await asyncio.sleep(1)
 
     except Exception as e:
         logging.error(f"Error processing text: {e}")
