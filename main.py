@@ -5,8 +5,8 @@ import json
 import requests
 import datetime
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 import google.generativeai as genai
 
 # Load environment variables
@@ -17,18 +17,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 API_URL = os.getenv("API_URL", "http://localhost:8000/tasks/")
 
 # --- DYNAMIC CONFIGURATION ---
-def fetch_valid_officers():
+def fetch_raw_officers():
     try:
-        # Derive employee URL from Tasks API URL (replace endpoint)
-        # API_URL is default "http://localhost:8000/tasks/"
-        # We need "http://localhost:8000/api/employees/"
-        # Note: In main.py of backend, prefix is "/api/tasks" and "/api/employees"
-        # If env API_URL includes full path, we need to be careful.
-        
-        # Safer approach: construct base from env or assumption
-        base_url = API_URL.rsplit('/', 2)[0] # http://localhost:8000/api
+        base_url = API_URL.rsplit('/', 2)[0]
         if not base_url.endswith("/api"):
-             # Fallback logic if API_URL format is different
              base_url = "http://localhost:8000/api"
         
         emp_url = f"{base_url}/employees/"
@@ -36,26 +28,38 @@ def fetch_valid_officers():
         
         response = requests.get(emp_url, timeout=4)
         if response.status_code == 200:
-            employees = response.json()
-            # Format: "Name -> Display Name" to provide context
-            # e.g. "Amit Verma -> AD CSSDA"
-            mapping = []
-            for e in employees:
-                name = e.get('name', '').strip()
-                disp = e.get('display_name', '').strip()
-                if name and disp:
-                     mapping.append(f"{name} -> {disp}")
-                elif disp:
-                     mapping.append(disp)
-            
-            if mapping:
-                return mapping
+            return response.json()
     except Exception as e:
         logging.error(f"Failed to fetch employees: {e}")
-    
-    # Fallback
-    return ["Me", "Others"]
+    return []
 
+def get_officer_prompt_list(officers):
+    mapping = []
+    if not officers:
+        return ["Me", "Others"]
+    for e in officers:
+        name = e.get('name', '').strip()
+        disp = e.get('display_name', '').strip()
+        if name and disp:
+             mapping.append(f"{name} -> {disp}")
+        elif disp:
+             mapping.append(disp)
+    return mapping
+
+def find_officer_contact(officers, assigned_name):
+    """Finds mobile number for the assigned agency."""
+    if not assigned_name:
+        return None, None
+    
+    # Normalizing comparison
+    target = assigned_name.lower().strip()
+    
+    for e in officers:
+        disp = e.get('display_name', '').strip()
+        if disp.lower() == target:
+            return e.get('name', disp), e.get('mobile', '')
+            
+    return None, None
 
 
 # Configure Logging
@@ -73,8 +77,88 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎙️ **Voice-to-Action Bot Active**\n\n"
         "Just send me a voice note like:\n"
         "_'Assign road repair in Geedam to PWD by next Friday.'_\n\n"
-        "I will automatically create the task in your dashboard."
+        "I will automatically create the task and ask to notify the officer."
     )
+
+async def notification_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer() # Acknowledge
+    
+    data = query.data
+    
+    if data == "notify_send":
+        # Simulate Sending
+        # In a real app, we would use Twilio (SMS) or Telegram Chat ID here.
+        # Since we only have Mobile Numbers, we simulate success.
+        original_text = query.message.text
+        # Append confirmation
+        await query.edit_message_text(
+            text=f"{original_text}\n\n✅ **Notification Sent!** (Simulated)\n*Note: To send real Telegram messages, Chat IDs are required.*",
+            parse_mode='Markdown'
+        )
+    elif data == "notify_cancel":
+        original_text = query.message.text
+        await query.edit_message_text(
+            text=f"{original_text}\n\n❌ **Notification Cancelled.**",
+            parse_mode='Markdown'
+        )
+
+async def process_task_creation(update: Update, task_data: dict, officers_list: list):
+    """Helper to push task to API and handle notification flow."""
+    try:
+        response = requests.post(API_URL, json=task_data)
+        
+        if response.status_code == 200 or response.status_code == 201:
+            created_task = response.json()
+            assigned_to = created_task.get('assigned_agency')
+            
+            reply = (
+                f"✅ **Task Created!**\n\n"
+                f"📝 **Task:** {task_data.get('task_number')}\n"
+                f"👤 **Assigned:** {assigned_to or 'Unassigned'}\n"
+                f"📅 **Deadline:** {created_task.get('deadline_date') or 'No Deadline'}"
+            )
+            await update.message.reply_text(reply, parse_mode='Markdown')
+            
+            # --- NOTIFICATION FLOW ---
+            if assigned_to:
+                name, mobile = find_officer_contact(officers_list, assigned_to)
+                if mobile:
+                    # Construct Notification Text
+                    notify_msg = (
+                        f"🔔 *Task Assignment*\n"
+                        f"Hello {name},\n"
+                        f"You have been assigned: {task_data.get('task_number')}\n"
+                        f"Deadline: {created_task.get('deadline_date')}\n"
+                        f"Priority: {created_task.get('priority')}"
+                    )
+                    
+                    # Prompt User
+                    prompt_text = (
+                        f"📢 **Notify Officer?**\n"
+                        f"Name: {name}\n"
+                        f"Mobile: {mobile}\n\n"
+                        f"**Message Preview:**\n"
+                        f"_{notify_msg}_"
+                    )
+                    
+                    keyboard = [
+                        [InlineKeyboardButton("✅ Send Notification", callback_data="notify_send")],
+                        [InlineKeyboardButton("❌ Cancel", callback_data="notify_cancel")]
+                    ]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
+                    await update.message.reply_text(prompt_text, reply_markup=reply_markup, parse_mode='Markdown')
+                else:
+                    logging.info(f"No mobile found for {assigned_to}")
+            
+        else:
+            await update.message.reply_text(f"⚠️ Failed to create task via API.\nStatus: {response.status_code}\nError: {response.text}")
+
+    except Exception as e:
+         logging.error(f"API Push Error: {e}")
+         await update.message.reply_text(f"❌ Error saving task: {str(e)}")
+
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -82,29 +166,27 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("🎧 Listening and processing...")
 
+    file_path = None
     try:
         # 1. Download Voice File
         voice_file = await update.message.voice.get_file()
         file_path = f"temp_voice_{user_id}_{int(datetime.datetime.now().timestamp())}.ogg"
         await voice_file.download_to_drive(file_path)
         
-        # 2. Transcribe & Extract with Gemini
-        # We upload the audio file directly to Gemini for multimodal processing
         logging.info(f"Uploading {file_path} to Gemini...")
-        
-        # Explicitly set mime_type for Telegram OGG/Opus audio
         myfile = genai.upload_file(file_path, mime_type="audio/ogg")
         
         today_str = datetime.date.today().strftime("%Y-%m-%d")
         year_str = datetime.date.today().year
 
-        valid_officers = fetch_valid_officers()
+        raw_officers = fetch_raw_officers()
+        valid_officers_prompt = get_officer_prompt_list(raw_officers)
         
         prompt = f"""
         Listen to this audio command. Today is {today_str}.
         
         VALID OFFICERS LIST:
-        {json.dumps(valid_officers)}
+        {json.dumps(valid_officers_prompt)}
 
         Extract the following details into a JSON object:
         - description: The full task description.
@@ -130,7 +212,6 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = model.generate_content([myfile, prompt])
         response_text = result.text.strip()
         
-        # Clean up JSON if wrapped in markdown
         if response_text.startswith("```json"):
             response_text = response_text[7:-3].strip()
         elif response_text.startswith("```"):
@@ -139,16 +220,13 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task_data = json.loads(response_text)
         logging.info(f"Extracted Data: {task_data}")
         
-        # --- DATA MAPPING CORRECTION ---
+        # Mapping Correction
         task_data['task_number'] = task_data.get('description', 'Voice Task')
         task_data['description'] = ""
         task_data['source'] = "VoiceBot"
-        today_str = datetime.date.today().strftime("%Y-%m-%d")
         task_data['allocated_date'] = today_str
         
-        # Calculate 'time_given' and handle defaults
         d1 = datetime.datetime.strptime(today_str, "%Y-%m-%d").date()
-        
         if task_data.get('deadline_date'):
             try:
                 d2 = datetime.datetime.strptime(task_data['deadline_date'], "%Y-%m-%d").date()
@@ -157,35 +235,18 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 task_data['time_given'] = "7"
         else:
-            # User Request: If no deadline, default Time Given to 7 days
             task_data['time_given'] = "7"
-            # Calculate deadline for DB (so Dashboard works immediately)
             d2 = d1 + datetime.timedelta(days=7)
             task_data['deadline_date'] = d2.strftime("%Y-%m-%d")
         
-        # 4. Push to API
-        response = requests.post(API_URL, json=task_data)
+        # Process and Notify
+        await process_task_creation(update, task_data, raw_officers)
         
-        # Clean up file
-        os.remove(file_path)
-        
-        if response.status_code == 200 or response.status_code == 201:
-            # Success
-            created_task = response.json()
-            reply = (
-                f"✅ **Task Created!**\n\n"
-                f"📝 **Task:** {task_data.get('task_number')}\n"
-                f"👤 **Assigned:** {created_task.get('assigned_agency') or 'Unassigned'}\n"
-                f"📅 **Deadline:** {created_task.get('deadline_date') or 'No Deadline'}"
-            )
-            await update.message.reply_text(reply, parse_mode='Markdown')
-        else:
-            await update.message.reply_text(f"⚠️ Failed to create task via API.\nStatus: {response.status_code}\nError: {response.text}")
-
     except Exception as e:
         logging.error(f"Error processing voice: {e}")
         await update.message.reply_text(f"❌ Error processing voice: {str(e)}")
-        if os.path.exists(file_path):
+    finally:
+        if file_path and os.path.exists(file_path):
             os.remove(file_path)
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -198,13 +259,15 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         today_str = datetime.date.today().strftime("%Y-%m-%d")
         year_str = datetime.date.today().year
-        valid_officers = fetch_valid_officers()
+        
+        raw_officers = fetch_raw_officers()
+        valid_officers_prompt = get_officer_prompt_list(raw_officers)
 
         prompt = f"""
         You are a smart Task Extractor. Today is {today_str} (Year {year_str}).
         
         VALID OFFICERS LIST:
-        {json.dumps(valid_officers)}
+        {json.dumps(valid_officers_prompt)}
         
         Analyze this command: "{text_content}"
         
@@ -233,7 +296,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = model.generate_content(prompt)
         response_text = result.text.strip()
         
-        # Clean up JSON if wrapped in markdown
         if response_text.startswith("```json"):
             response_text = response_text[7:-3].strip()
         elif response_text.startswith("```"):
@@ -242,19 +304,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task_data = json.loads(response_text)
         logging.info(f"Extracted Data: {task_data}")
         
-        # --- DATA MAPPING CORRECTION ---
-        # User wants the Task Description in "Task/File No" column (task_number).
         task_data['task_number'] = task_data.get('description', 'Task')
-        
-        # Description field (Col 4 - Notes) must be EMPTY as per user request
         task_data['description'] = ""
-        
         task_data['source'] = "VoiceBot"
         task_data['allocated_date'] = today_str
         
-        # Calculate 'time_given' and handle defaults
         d1 = datetime.datetime.strptime(today_str, "%Y-%m-%d").date()
-        
         if task_data.get('deadline_date'):
             try:
                 d2 = datetime.datetime.strptime(task_data['deadline_date'], "%Y-%m-%d").date()
@@ -263,27 +318,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 task_data['time_given'] = "7"
         else:
-            # User Request: If no deadline, default Time Given to 7 days
             task_data['time_given'] = "7"
-            # Calculate deadline for DB (so Dashboard works immediately)
             d2 = d1 + datetime.timedelta(days=7)
             task_data['deadline_date'] = d2.strftime("%Y-%m-%d")
         
-        # Push to API
-        response = requests.post(API_URL, json=task_data)
-        
-        if response.status_code == 200 or response.status_code == 201:
-            # Success
-            created_task = response.json()
-            reply = (
-                f"✅ **Task Created!**\n\n"
-                f"📝 **Task:** {task_data.get('task_number')}\n"
-                f"👤 **Assigned:** {created_task.get('assigned_agency') or 'Unassigned'}\n"
-                f"📅 **Deadline:** {created_task.get('deadline_date') or 'No Deadline'}"
-            )
-            await update.message.reply_text(reply, parse_mode='Markdown')
-        else:
-            await update.message.reply_text(f"⚠️ Failed to create task via API.\nStatus: {response.status_code}\nError: {response.text}")
+        await process_task_creation(update, task_data, raw_officers)
 
     except Exception as e:
         logging.error(f"Error processing text: {e}")
@@ -299,6 +338,8 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.VOICE, voice_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    # Callback Handler
+    application.add_handler(CallbackQueryHandler(notification_callback))
     
     print("Voice & Text Bot Started...")
     application.run_polling()
