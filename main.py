@@ -146,12 +146,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # --- DATA MAPPING CORRECTION ---
         # User wants the Task Description in "Task/File No" column (task_number).
-        # We append a short random ID to ensure uniqueness in DB.
-        import random
-        short_id = str(random.randint(1000, 9999))
+        # Removed random suffix as per user request.
         
         # Main Task goes to task_number
-        task_data['task_number'] = f"{task_data.get('description', 'Task')} ({short_id})"
+        task_data['task_number'] = task_data.get('description', 'Task')
         
         # Description field (Col 4) can be a fallback or same
         task_data['description'] = "Voice Entry"
