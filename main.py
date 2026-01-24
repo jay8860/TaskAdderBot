@@ -122,7 +122,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Extract the following details into a JSON object:
         - description: The full task description.
         - assigned_agency: The agency or person assigned. 
-          * If user says "me", "myself", "self" -> set as "District Collector".
+          * If user says "me", "myself", "self" -> set as "Me".
           * Otherwise extract name/agency (e.g. PWD, RES). If not specified, null.
         - deadline_date: The deadline date in YYYY-MM-DD format. 
           * CRITICAL: If audio says "today", use {today_str}. 
