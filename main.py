@@ -24,7 +24,7 @@ logging.basicConfig(
 
 # Configure Gemini
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-flash-latest')
+model = genai.GenerativeModel('gemini-2.0-flash')
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -50,12 +50,15 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # We upload the audio file directly to Gemini for multimodal processing
         logging.info(f"Uploading {file_path} to Gemini...")
         
-        myfile = genai.upload_file(file_path)
+        # Explicitly set mime_type for Telegram OGG/Opus audio
+        myfile = genai.upload_file(file_path, mime_type="audio/ogg")
         
         prompt = """
         Listen to this audio command. Extract the following details into a JSON object:
         - description: The full task description.
-        - assigned_agency: The agency or person assigned (e.g., PWD, RES, Engineer Name). If not specified, null.
+        - assigned_agency: The agency or person assigned. 
+          * If user says "me", "myself", "self" -> set as "Me".
+          * Otherwise extract name/agency (e.g. PWD, RES). If not specified, null.
         - deadline_date: The deadline date in YYYY-MM-DD format. Calculate based on context (e.g., "next Friday"). If not specified, null.
         - priority: High, Medium, or Low. Infer from urgency.
         
@@ -74,10 +77,22 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task_data = json.loads(response_text)
         logging.info(f"Extracted Data: {task_data}")
         
-        # 3. Create Task ID (Simple Random/Timestamp for now if API needs it, OR API handles it)
-        # The API requires 'task_number'. We'll generate a "VOICE-XXX" number.
-        task_data['task_number'] = f"V-{int(datetime.datetime.now().timestamp())}"
+        # --- DATA MAPPING CORRECTION ---
+        task_data['task_number'] = task_data.get('description', 'Voice Task')
+        task_data['description'] = ""
         task_data['source'] = "VoiceBot"
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+        task_data['allocated_date'] = today_str
+        
+        # Calculate 'time_given'
+        if task_data.get('deadline_date'):
+            try:
+                d1 = datetime.datetime.strptime(today_str, "%Y-%m-%d").date()
+                d2 = datetime.datetime.strptime(task_data['deadline_date'], "%Y-%m-%d").date()
+                delta = (d2 - d1).days
+                task_data['time_given'] = str(delta)
+            except:
+                task_data['time_given'] = ""
         
         # 4. Push to API
         response = requests.post(API_URL, json=task_data)
@@ -89,11 +104,10 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Success
             created_task = response.json()
             reply = (
-                f"✅ **Task Created Successfully!**\n\n"
-                f"🆔 `{created_task.get('task_number')}`\n"
-                f"📝 {created_task.get('description')}\n"
-                f"👤 {created_task.get('assigned_agency') or 'Unassigned'}\n"
-                f"📅 {created_task.get('deadline_date') or 'No Deadline'}"
+                f"✅ **Task Created!**\n\n"
+                f"📝 **Task:** {task_data.get('task_number')}\n"
+                f"👤 **Assigned:** {created_task.get('assigned_agency') or 'Unassigned'}\n"
+                f"📅 **Deadline:** {created_task.get('deadline_date') or 'No Deadline'}"
             )
             await update.message.reply_text(reply, parse_mode='Markdown')
         else:
@@ -101,7 +115,7 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logging.error(f"Error processing voice: {e}")
-        await update.message.reply_text("❌ Something went wrong while processing your voice note.")
+        await update.message.reply_text(f"❌ Error processing voice: {str(e)}")
         if os.path.exists(file_path):
             os.remove(file_path)
 
