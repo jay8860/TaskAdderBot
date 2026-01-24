@@ -16,6 +16,20 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 API_URL = os.getenv("API_URL", "http://localhost:8000/tasks/")
 
+# --- CONFIGURATION FROM SHEET ---
+VALID_OFFICERS = [
+    "AC Tribal", "Aditya DMF", "Alka DMF", "All CEOs", "All CEOs + LDM", "Amit Skill", 
+    "APO Tarun", "APO NREGA", "BC PMAY Geedam", "CEO JP Dantewada", "CEO JP Geedam", 
+    "CEO JP Katekalyan", "CEO JP Kuakonda", "CMHO", "CMO Dantewada", "CS Abhay", "CSEB", 
+    "CSSDA", "DC PMAY", "DC SBM Mamta", "DD Agri", "DD Vet", "DD Fisheries", "DD Social Welfare", 
+    "DDP", "DDP + CEO JP Dante", "DEO", "Divya PPIA", "DMC", "DPM Livelihood", "DPM MIS", 
+    "DPM NRLM", "DPM SMIB", "DPO WCD", "EDM", "EE PWD", "EE RES", "EE RES and Vineet Te", 
+    "Korram Steno", "LDM and EDM", "Me", "Others", "PO Manoj", "PMGSY", "Pradeep Sports", 
+    "Praneeth", "Principal Livelihood", "PWD EnM", "PWD SDO Ram", "Sachivs", "SDM Geedam", 
+    "SDMs", "Sudama", "APO Niramn"
+]
+
+
 # Configure Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -53,13 +67,29 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Explicitly set mime_type for Telegram OGG/Opus audio
         myfile = genai.upload_file(file_path, mime_type="audio/ogg")
         
-        prompt = """
-        Listen to this audio command. Extract the following details into a JSON object:
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+        year_str = datetime.date.today().year
+
+        prompt = f"""
+        Listen to this audio command. Today is {today_str}.
+        
+        VALID OFFICERS LIST:
+        {json.dumps(VALID_OFFICERS)}
+
+        Extract the following details into a JSON object:
         - description: The full task description.
         - assigned_agency: The agency or person assigned. 
-          * If user says "me", "myself", "self" -> set as "Me".
-          * Otherwise extract name/agency (e.g. PWD, RES). If not specified, null.
-        - deadline_date: The deadline date in YYYY-MM-DD format. Calculate based on context (e.g., "next Friday"). If not specified, null.
+          * MATCHING RULE: strict fuzzy match against VALID OFFICERS LIST.
+          * Example: "Aditya" -> "Aditya DMF", "Meena Horti" -> "DD Horti" (if relatable).
+          * If user says "me", "myself" -> "Me".
+          * If the name sounds similar to a valid officer, use the valid officer name.
+          * If NO match found, use the name exactly as spoken.
+          * If not specified, null.
+        - deadline_date: The deadline date in YYYY-MM-DD format. 
+          * Calculate based on context (e.g., "next Friday"). 
+          * CRITICAL: Assume year is {year_str} unless explicitly stated otherwise.
+          * If "tomorrow", use date+1.
+          * If not specified, null.
         - priority: High, Medium, or Low. Infer from urgency.
         
         Return ONLY the JSON.
@@ -84,15 +114,22 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         today_str = datetime.date.today().strftime("%Y-%m-%d")
         task_data['allocated_date'] = today_str
         
-        # Calculate 'time_given'
+        # Calculate 'time_given' and handle defaults
+        d1 = datetime.datetime.strptime(today_str, "%Y-%m-%d").date()
+        
         if task_data.get('deadline_date'):
             try:
-                d1 = datetime.datetime.strptime(today_str, "%Y-%m-%d").date()
                 d2 = datetime.datetime.strptime(task_data['deadline_date'], "%Y-%m-%d").date()
                 delta = (d2 - d1).days
                 task_data['time_given'] = str(delta)
             except:
-                task_data['time_given'] = ""
+                task_data['time_given'] = "7"
+        else:
+            # User Request: If no deadline, default Time Given to 7 days
+            task_data['time_given'] = "7"
+            # Calculate deadline for DB (so Dashboard works immediately)
+            d2 = d1 + datetime.timedelta(days=7)
+            task_data['deadline_date'] = d2.strftime("%Y-%m-%d")
         
         # 4. Push to API
         response = requests.post(API_URL, json=task_data)
@@ -128,21 +165,31 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         today_str = datetime.date.today().strftime("%Y-%m-%d")
+        year_str = datetime.date.today().year
         prompt = f"""
-        You are a smart Task Extractor. Today is {today_str}.
+        You are a smart Task Extractor. Today is {today_str} (Year {year_str}).
+        
+        VALID OFFICERS LIST:
+        {json.dumps(VALID_OFFICERS)}
         
         Analyze this command: "{text_content}"
         
         Extract the following details into a JSON object:
         - description: The full task description.
         - assigned_agency: The agency or person assigned. 
-          * If user says "me", "myself", "self" -> set as "Me".
-          * Otherwise extract name/agency (e.g. PWD, RES). If not specified, null.
+          * MATCHING RULE: strict fuzzy match against VALID OFFICERS LIST.
+          * Example: "Aditya" -> "Aditya DMF", "Meena Horti" -> "DD Horti" (if relatable).
+          * If user says "me", "myself" -> "Me".
+          * If the name sounds similar to a valid officer, use the valid officer name.
+          * If NO match found, use the name exactly as written.
+          * If not specified, null.
         - deadline_date: The deadline date in YYYY-MM-DD format. 
-          * CRITICAL: If audio says "today", use {today_str}. 
+          * CRITICAL: Start with the year {year_str}.
+          * If audio says "today", use {today_str}. 
           * If "tomorrow", use date+1. 
           * If "next week", use date+7. 
-          * Do NOT default to a week if not specified. default to null.
+          * If month is mentioned (e.g., "August 24"), assume {year_str} unless a different year is explicitly said.
+          * Do NOT default to a week if not specified. Default to null.
         - priority: High, Medium, or Low. Infer from urgency.
         
         Return ONLY the JSON.
@@ -170,15 +217,22 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task_data['source'] = "VoiceBot"
         task_data['allocated_date'] = today_str
         
-        # Calculate 'time_given' for the Sheet (Col 9)
+        # Calculate 'time_given' and handle defaults
+        d1 = datetime.datetime.strptime(today_str, "%Y-%m-%d").date()
+        
         if task_data.get('deadline_date'):
             try:
-                d1 = datetime.datetime.strptime(today_str, "%Y-%m-%d").date()
                 d2 = datetime.datetime.strptime(task_data['deadline_date'], "%Y-%m-%d").date()
                 delta = (d2 - d1).days
                 task_data['time_given'] = str(delta)
             except:
-                task_data['time_given'] = ""
+                task_data['time_given'] = "7"
+        else:
+            # User Request: If no deadline, default Time Given to 7 days
+            task_data['time_given'] = "7"
+            # Calculate deadline for DB (so Dashboard works immediately)
+            d2 = d1 + datetime.timedelta(days=7)
+            task_data['deadline_date'] = d2.strftime("%Y-%m-%d")
         
         # Push to API
         response = requests.post(API_URL, json=task_data)
