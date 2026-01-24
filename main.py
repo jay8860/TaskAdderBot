@@ -61,6 +61,17 @@ def find_officer_contact(officers, assigned_name):
             
     return None, None
 
+def clean_agency_name(name):
+    """
+    Removes the 'Name -> ' prefix if present.
+    Example: 'Aditya -> Aditya DMF' becomes 'Aditya DMF'.
+    """
+    if not name:
+        return name
+    if "->" in name:
+        return name.split("->")[-1].strip()
+    return name.strip()
+
 
 # Configure Logging
 logging.basicConfig(
@@ -234,6 +245,10 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, task_data in enumerate(task_list):
             # Mapping Correction per Task
             task_data['task_number'] = task_data.get('description', f'Voice Task {i+1}')
+            
+            # Fix Assigned Agency Name (Remove 'Name -> ' artifact)
+            task_data['assigned_agency'] = clean_agency_name(task_data.get('assigned_agency'))
+
             task_data['description'] = ""
             task_data['source'] = "VoiceBot"
             task_data['allocated_date'] = today_str
@@ -330,6 +345,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         for i, task_data in enumerate(task_list):
             task_data['task_number'] = task_data.get('description', f'Task {i+1}')
+            
+            # Fix Assigned Agency Name (Remove 'Name -> ' artifact)
+            task_data['assigned_agency'] = clean_agency_name(task_data.get('assigned_agency'))
+            
             task_data['description'] = ""
             task_data['source'] = "VoiceBot"
             task_data['allocated_date'] = today_str
