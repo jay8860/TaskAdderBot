@@ -131,37 +131,13 @@ async def process_task_creation(update: Update, task_data: dict, officers_list: 
             )
             await update.message.reply_text(reply, parse_mode='Markdown')
             
-            # --- NOTIFICATION FLOW ---
-            if assigned_to:
-                name, mobile = find_officer_contact(officers_list, assigned_to)
-                if mobile:
-                    # Construct Notification Text
-                    notify_msg = (
-                        f"🔔 *Task Assignment*\n"
-                        f"Hello {name},\n"
-                        f"You have been assigned: {task_data.get('task_number')}\n"
-                        f"Deadline: {created_task.get('deadline_date')}\n"
-                        f"Priority: {created_task.get('priority')}"
-                    )
-                    
-                    # Prompt User
-                    prompt_text = (
-                        f"📢 **Notify Officer?**\n"
-                        f"Name: {name}\n"
-                        f"Mobile: {mobile}\n\n"
-                        f"**Message Preview:**\n"
-                        f"_{notify_msg}_"
-                    )
-                    
-                    keyboard = [
-                        [InlineKeyboardButton("✅ Send Notification", callback_data="notify_send")],
-                        [InlineKeyboardButton("❌ Cancel", callback_data="notify_cancel")]
-                    ]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    
-                    await update.message.reply_text(prompt_text, reply_markup=reply_markup, parse_mode='Markdown')
-                else:
-                    logging.info(f"No mobile found for {assigned_to}")
+            # --- NOTIFICATION FLOW DISABLED (User Request) ---
+            # if assigned_to:
+            #     name, mobile = find_officer_contact(officers_list, assigned_to)
+            #     if mobile:
+            #         logging.info(f"Notification skipped for {name} ({mobile}) as per config.")
+            #     else:
+            #         logging.info(f"No mobile found for {assigned_to}")
             
         else:
             await update.message.reply_text(f"⚠️ Failed to create task via API.\nStatus: {response.status_code}\nError: {response.text}")
