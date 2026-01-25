@@ -41,10 +41,35 @@ def get_officer_prompt_list(officers):
         name = e.get('name', '').strip()
         disp = e.get('display_name', '').strip()
         if name and disp:
+             # FORMAT: Casual Name -> Official Display Name
              mapping.append(f"{name} -> {disp}")
         elif disp:
              mapping.append(disp)
     return mapping
+
+def normalize_to_display_name(officers, assigned_name):
+    """
+    Strictly maps any incoming name (casual or display) back to the official Display Name.
+    Example: 'Ramlal Korram' -> 'Steno' (if mapped)
+    """
+    if not assigned_name:
+        return "Steno" # Default
+        
+    target = assigned_name.lower().strip()
+    
+    # 1. Check if it's already a Display Name (Direct Match)
+    for e in officers:
+        disp = e.get('display_name', '').strip()
+        if disp.lower() == target:
+            return disp
+            
+    # 2. Check if it's a Casual Name (Mapping Match)
+    for e in officers:
+        name = e.get('name', '').strip()
+        if name.lower() == target:
+            return e.get('display_name', name)
+            
+    return assigned_name # Fallback to original if no match found
 
 def find_officer_contact(officers, assigned_name):
     """Finds mobile number for the assigned agency."""
@@ -185,13 +210,14 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Extract the details into a JSON LIST of objects.
         Each object in the list must have:
         - description: The full task description.
-        - assigned_agency: The agency or person assigned (Fuzzy Match against LIST).
-          * Rule: Name -> Display Name mapping.
+        - assigned_agency: The agency or person assigned (MATCH AGAINST VALID OFFICERS LIST).
+          * RULE: You MUST return the "Official Display Name" (the part AFTER the '->').
+          * EXAMPLE: If list says "Ramlal Korram -> Steno" and audio says "Ramlal", you MUST return "Steno".
           * CRITICAL: If the person to assign the task to is not clear, not mentioned, or ambiguous, assign it to "Steno" by default.
         - deadline_date: YYYY-MM-DD. (Default to null if not clear).
         - priority: High/Medium/Low.
         
-        Return ONLY the JSON LIST. Example: [{{...}}, {{...}}]
+        Return ONLY the JSON LIST. Example: [{{"description": "...", "assigned_agency": "Steno", ...}}]
         """
         
         result = model.generate_content([myfile, prompt])
@@ -223,8 +249,8 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Mapping Correction per Task
             task_data['task_number'] = task_data.get('description', f'Voice Task {i+1}')
             
-            # Fix Assigned Agency Name (Remove 'Name -> ' artifact)
-            task_data['assigned_agency'] = clean_agency_name(task_data.get('assigned_agency'))
+            # Fix Assigned Agency Name (Strict Normalization to Display Name)
+            task_data['assigned_agency'] = normalize_to_display_name(raw_officers, task_data.get('assigned_agency'))
 
             task_data['description'] = ""
             task_data['source'] = "VoiceBot"
@@ -287,13 +313,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Extract the details into a JSON LIST of objects.
         Each object in the list must have:
         - description: The full task description.
-        - assigned_agency: The agency or person assigned (Fuzzy Match against LIST).
-          * Rule: Name -> Display Name mapping.
+        - assigned_agency: The agency or person assigned (MATCH AGAINST VALID OFFICERS LIST).
+          * RULE: You MUST return the "Official Display Name" (the part AFTER the '->').
+          * EXAMPLE: If list says "Ramlal Korram -> Steno" and audio says "Ramlal", you MUST return "Steno".
           * CRITICAL: If the person to assign the task to is not clear, not mentioned, or ambiguous, assign it to "Steno" by default.
         - deadline_date: YYYY-MM-DD. (Default to null).
         - priority: High/Medium/Low.
         
-        Return ONLY the JSON LIST. Example: [{{...}}, {{...}}]
+        Return ONLY the JSON LIST. Example: [{{"description": "...", "assigned_agency": "Steno", ...}}]
         """
         
         result = model.generate_content(prompt)
@@ -324,8 +351,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, task_data in enumerate(task_list):
             task_data['task_number'] = task_data.get('description', f'Task {i+1}')
             
-            # Fix Assigned Agency Name (Remove 'Name -> ' artifact)
-            task_data['assigned_agency'] = clean_agency_name(task_data.get('assigned_agency'))
+            # Fix Assigned Agency Name (Strict Normalization to Display Name)
+            task_data['assigned_agency'] = normalize_to_display_name(raw_officers, task_data.get('assigned_agency'))
             
             task_data['description'] = ""
             task_data['source'] = "VoiceBot"
