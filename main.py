@@ -172,211 +172,124 @@ async def process_task_creation(update: Update, task_data: dict, officers_list: 
          await update.message.reply_text(f"❌ Error saving task: {str(e)}")
 
 
+async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = False, file_path: str = None):
+    """Unified logic for voice and text processing."""
+    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    year_str = datetime.date.today().year
+    raw_officers = fetch_raw_officers()
+    valid_officers_prompt = get_officer_prompt_list(raw_officers)
+    
+    # 1. Intent Detection & Translation Prompt
+    intent_prompt = f"""
+    You are a smart Task Assistant. Today is {today_str} (Year {year_str}).
+    
+    VALID OFFICERS LIST:
+    {json.dumps(valid_officers_prompt)}
+
+    INSTRUCTIONS:
+    1. Detect INTENT: "CREATE" (log new task) or "QUERY" (ask about tasks).
+    2. TRANSLATION: If input is in Hindi, translate it to English.
+    3. FOR "CREATE": Extract details into a JSON list.
+       - Each task must have: description (English), assigned_agency (Official Display Name), deadline_date, priority.
+       - Use "Steno" as default assignment.
+    4. FOR "QUERY": Extract search parameters into a JSON object.
+       - search_query: The translated question in English.
+
+    Return ONLY JSON:
+    {{
+      "intent": "CREATE" | "QUERY",
+      "data": [...] or {{"search_query": "..."}}
+    }}
+    """
+    
+    try:
+        if is_voice and file_path:
+             logging.info(f"Uploading {file_path} to Gemini...")
+             myfile = genai.upload_file(file_path, mime_type="audio/ogg")
+             result = model.generate_content([myfile, intent_prompt])
+        else:
+             result = model.generate_content(f"Analyze this command: \"{prompt_input}\"\n\n{intent_prompt}")
+             
+        response_text = result.text.strip()
+        if response_text.startswith("```json"): response_text = response_text[7:-3].strip()
+        elif response_text.startswith("```"): response_text = response_text[3:-3].strip()
+        
+        classification = json.loads(response_text)
+        intent = classification.get("intent")
+        data = classification.get("data")
+        
+        logging.info(f"Detected Intent: {intent}")
+
+        if intent == "CREATE":
+            task_list = data if isinstance(data, list) else [data]
+            if not task_list:
+                await update.message.reply_text("⚠️ I couldn't understand any tasks from that.")
+                return
+
+            await update.message.reply_text(f"🔍 Found {len(task_list)} task(s). Processing...")
+            for i, task_data in enumerate(task_list):
+                task_data['task_number'] = task_data.get('description', f'Task {i+1}')
+                task_data['assigned_agency'] = normalize_to_display_name(raw_officers, task_data.get('assigned_agency'))
+                task_data['description'] = ""
+                task_data['source'] = "VoiceBot"
+                task_data['allocated_date'] = today_str
+                
+                # Deadline Logic
+                d1 = datetime.datetime.strptime(today_str, "%Y-%m-%d").date()
+                if task_data.get('deadline_date'):
+                    try:
+                        d2 = datetime.datetime.strptime(task_data['deadline_date'], "%Y-%m-%d").date()
+                        task_data['time_given'] = str((d2 - d1).days)
+                    except: task_data['time_given'] = "7"
+                else:
+                    task_data['time_given'] = "7"
+                    task_data['deadline_date'] = (d1 + datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+                
+                await process_task_creation(update, task_data, raw_officers)
+                await asyncio.sleep(0.5)
+
+        elif intent == "QUERY":
+            await update.message.reply_text("🔎 Searching database...")
+            # Fetch all tasks for context
+            resp = requests.get(API_URL)
+            if resp.status_code == 200:
+                all_tasks = resp.json()
+                # Limit context size (e.g. last 100 tasks or active ones)
+                context_tasks = all_tasks[-100:] 
+                
+                query_prompt = f"""
+                User Question: "{data.get('search_query', prompt_input)}"
+                
+                REAL-TIME TASK DATA (CONTEXT):
+                {json.dumps([{ 'task': t['task_number'], 'assigned': t['assigned_agency'], 'status': t['status'], 'deadline': t['deadline_date'] } for t in context_tasks])}
+                
+                INSTRUCTION:
+                Answer the user's question based ONLY on the provided context. 
+                Be concise and helpful. Use Markdown for formatting.
+                """
+                answer = model.generate_content(query_prompt)
+                await update.message.reply_text(answer.text, parse_mode='Markdown')
+            else:
+                await update.message.reply_text("❌ Failed to fetch task data for search.")
+
+    except Exception as e:
+        logging.error(f"Logic Error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    logging.info(f"Received voice note from {user_id}")
-    
     await update.message.reply_text("🎧 Listening and processing...")
-
-    file_path = None
+    file_path = f"temp_voice_{user_id}_{int(datetime.datetime.now().timestamp())}.ogg"
     try:
-        # 1. Download Voice File
         voice_file = await update.message.voice.get_file()
-        file_path = f"temp_voice_{user_id}_{int(datetime.datetime.now().timestamp())}.ogg"
         await voice_file.download_to_drive(file_path)
-        
-        logging.info(f"Uploading {file_path} to Gemini...")
-        myfile = genai.upload_file(file_path, mime_type="audio/ogg")
-        
-        today_str = datetime.date.today().strftime("%Y-%m-%d")
-        year_str = datetime.date.today().year
-
-        raw_officers = fetch_raw_officers()
-        valid_officers_prompt = get_officer_prompt_list(raw_officers)
-        
-        prompt = f"""
-        Listen to this audio command. Today is {today_str}. (Year {year_str})
-        
-        VALID OFFICERS LIST:
-        {json.dumps(valid_officers_prompt)}
-
-        INSTRUCTION:
-        This audio may contain one or multiple tasks.
-        CRITICAL SPLITTING RULE:
-        - Only split into multiple tasks if the user explicitly uses the word "Next" (e.g., "Next", "Next task", "Next one").
-        - Do NOT split on "and" (e.g. "Repair the road and fix the light" should be ONE task unless "Next" is used).
-        - Treat "and" as a connector within a single task description.
-        
-        Extract the details into a JSON LIST of objects.
-        Each object in the list must have:
-        - description: The full task description.
-        - assigned_agency: The agency or person assigned (MATCH AGAINST VALID OFFICERS LIST).
-          * RULE: You MUST return the "Official Display Name" (the part AFTER the '->').
-          * EXAMPLE: If list says "Ramlal Korram -> Steno" and audio says "Ramlal", you MUST return "Steno".
-          * CRITICAL: If the person to assign the task to is not clear, not mentioned, or ambiguous, assign it to "Steno" by default.
-        - deadline_date: YYYY-MM-DD. (Default to null if not clear).
-        - priority: High/Medium/Low.
-        
-        Return ONLY the JSON LIST. Example: [{{"description": "...", "assigned_agency": "Steno", ...}}]
-        """
-        
-        result = model.generate_content([myfile, prompt])
-        response_text = result.text.strip()
-        
-        if response_text.startswith("```json"):
-            response_text = response_text[7:-3].strip()
-        elif response_text.startswith("```"):
-            response_text = response_text[3:-3].strip()
-            
-        data_extracted = json.loads(response_text)
-        logging.info(f"Extracted Data: {data_extracted}")
-        
-        # Normalize to list
-        if isinstance(data_extracted, dict):
-            task_list = [data_extracted]
-        elif isinstance(data_extracted, list):
-            task_list = data_extracted
-        else:
-            task_list = []
-            
-        if not task_list:
-            await update.message.reply_text("⚠️ I couldn't understand any tasks from that.")
-            return
-
-        await update.message.reply_text(f"🔍 Found {len(task_list)} task(s). Processing...")
-
-        for i, task_data in enumerate(task_list):
-            # Mapping Correction per Task
-            task_data['task_number'] = task_data.get('description', f'Voice Task {i+1}')
-            
-            # Fix Assigned Agency Name (Strict Normalization to Display Name)
-            task_data['assigned_agency'] = normalize_to_display_name(raw_officers, task_data.get('assigned_agency'))
-
-            task_data['description'] = ""
-            task_data['source'] = "VoiceBot"
-            task_data['allocated_date'] = today_str
-            
-            d1 = datetime.datetime.strptime(today_str, "%Y-%m-%d").date()
-            if task_data.get('deadline_date'):
-                try:
-                    d2 = datetime.datetime.strptime(task_data['deadline_date'], "%Y-%m-%d").date()
-                    delta = (d2 - d1).days
-                    task_data['time_given'] = str(delta)
-                except:
-                    task_data['time_given'] = "7"
-            else:
-                task_data['time_given'] = "7"
-                d2 = d1 + datetime.timedelta(days=7)
-                task_data['deadline_date'] = d2.strftime("%Y-%m-%d")
-            
-            # Process and Notify
-            await process_task_creation(update, task_data, raw_officers)
-            # Small delay to avoid message flood/order issues
-            await asyncio.sleep(1)
-
-    except Exception as e:
-        logging.error(f"Error processing voice: {e}")
-        await update.message.reply_text(f"❌ Error processing voice: {str(e)}")
+        await handle_core_logic(update, "", is_voice=True, file_path=file_path)
     finally:
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
+        if file_path and os.path.exists(file_path): os.remove(file_path)
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    text_content = update.message.text
-    logging.info(f"Received text from {user_id}: {text_content}")
-    
-    await update.message.reply_text("✍️ Processing your text...")
-
-    try:
-        today_str = datetime.date.today().strftime("%Y-%m-%d")
-        year_str = datetime.date.today().year
-        
-        raw_officers = fetch_raw_officers()
-        valid_officers_prompt = get_officer_prompt_list(raw_officers)
-
-        prompt = f"""
-        You are a smart Task Extractor. Today is {today_str} (Year {year_str}).
-        
-        VALID OFFICERS LIST:
-        {json.dumps(valid_officers_prompt)}
-        
-        INSTRUCTION:
-        This text may contain one or multiple tasks.
-        CRITICAL SPLITTING RULE:
-        - Only split into multiple tasks if the user explicitly uses the word "Next" (e.g., "Next", "Next task", "Next one").
-        - Do NOT split on "and".
-        - Treat "and" as a connector within a single task description.
-
-        Analyze this command: "{text_content}"
-        
-        Extract the details into a JSON LIST of objects.
-        Each object in the list must have:
-        - description: The full task description.
-        - assigned_agency: The agency or person assigned (MATCH AGAINST VALID OFFICERS LIST).
-          * RULE: You MUST return the "Official Display Name" (the part AFTER the '->').
-          * EXAMPLE: If list says "Ramlal Korram -> Steno" and audio says "Ramlal", you MUST return "Steno".
-          * CRITICAL: If the person to assign the task to is not clear, not mentioned, or ambiguous, assign it to "Steno" by default.
-        - deadline_date: YYYY-MM-DD. (Default to null).
-        - priority: High/Medium/Low.
-        
-        Return ONLY the JSON LIST. Example: [{{"description": "...", "assigned_agency": "Steno", ...}}]
-        """
-        
-        result = model.generate_content(prompt)
-        response_text = result.text.strip()
-        
-        if response_text.startswith("```json"):
-            response_text = response_text[7:-3].strip()
-        elif response_text.startswith("```"):
-            response_text = response_text[3:-3].strip()
-            
-        data_extracted = json.loads(response_text)
-        logging.info(f"Extracted Data: {data_extracted}")
-        
-        # Normalize to list
-        if isinstance(data_extracted, dict):
-            task_list = [data_extracted]
-        elif isinstance(data_extracted, list):
-            task_list = data_extracted
-        else:
-            task_list = []
-            
-        if not task_list:
-             await update.message.reply_text("⚠️ I couldn't understand any tasks from that.")
-             return
-
-        await update.message.reply_text(f"🔍 Found {len(task_list)} task(s). Processing...")
-
-        for i, task_data in enumerate(task_list):
-            task_data['task_number'] = task_data.get('description', f'Task {i+1}')
-            
-            # Fix Assigned Agency Name (Strict Normalization to Display Name)
-            task_data['assigned_agency'] = normalize_to_display_name(raw_officers, task_data.get('assigned_agency'))
-            
-            task_data['description'] = ""
-            task_data['source'] = "VoiceBot"
-            task_data['allocated_date'] = today_str
-            
-            d1 = datetime.datetime.strptime(today_str, "%Y-%m-%d").date()
-            if task_data.get('deadline_date'):
-                try:
-                    d2 = datetime.datetime.strptime(task_data['deadline_date'], "%Y-%m-%d").date()
-                    delta = (d2 - d1).days
-                    task_data['time_given'] = str(delta)
-                except:
-                    task_data['time_given'] = "7"
-            else:
-                task_data['time_given'] = "7"
-                d2 = d1 + datetime.timedelta(days=7)
-                task_data['deadline_date'] = d2.strftime("%Y-%m-%d")
-            
-            await process_task_creation(update, task_data, raw_officers)
-            await asyncio.sleep(1)
-
-    except Exception as e:
-        logging.error(f"Error processing text: {e}")
-        await update.message.reply_text("❌ Something went wrong while processing your text.")
+    await update.message.reply_text("✍️ Processing...")
+    await handle_core_logic(update, update.message.text)
 
 def main():
     if not TOKEN:
