@@ -179,14 +179,10 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
     raw_officers = fetch_raw_officers()
     valid_officers_prompt = get_officer_prompt_list(raw_officers)
     
-    # 1. Intent Detection & Translation Prompt
-    intent_prompt = f"""
-    You are a smart Task Assistant. Today is {today_str} (Year {year_str}).
-    
-    VALID OFFICERS LIST:
-    {json.dumps(valid_officers_prompt)}
-
-    INSTRUCTIONS:
+    # 1. Intent Detection & Translation Prompt (Using concatenation for safety)
+    intent_prompt = "You are a smart Task Assistant. Today is " + today_str + " (Year " + str(year_str) + ").\n\n"
+    intent_prompt += "VALID OFFICERS LIST:\n" + json.dumps(valid_officers_prompt) + "\n\n"
+    intent_prompt += """INSTRUCTIONS:
     1. Detect INTENT: "CREATE" (log new task) or "QUERY" (ask about tasks).
     2. TRANSLATION: If the user speaks in Hindi, you MUST translate it into a professional, grammatically correct English sentence.
        - STRICT RULE: DO NOT use 'Hinglish' or transliterated Hindi (e.g., "bolna", "kar dena", "dega" are FORBIDDEN).
@@ -204,10 +200,10 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
        - search_query: The user's question translated into English.
 
     Return ONLY JSON:
-    {{
+    {
       "intent": "CREATE" | "QUERY",
-      "data": [...] or {{"search_query": "..."}}
-    }}
+      "data": [...] or {"search_query": "..."}
+    }
     """
     
     try:
@@ -216,7 +212,7 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
              myfile = genai.upload_file(file_path, mime_type="audio/ogg")
              result = model.generate_content([myfile, intent_prompt])
         else:
-             result = model.generate_content(f"Analyze this command: \"{prompt_input}\"\n\n{intent_prompt}")
+             result = model.generate_content("Analyze this command: \"" + prompt_input + "\"\n\n" + intent_prompt)
              
         response_text = result.text.strip()
         if response_text.startswith("```json"): response_text = response_text[7:-3].strip()
@@ -236,9 +232,10 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
 
             await update.message.reply_text(f"🔍 Found {len(task_list)} task(s). Processing...")
             for i, task_data in enumerate(task_list):
-                task_data['task_number'] = task_data.get('description', f'Task {i+1}')
+                task_desc = task_data.get('description', f'Task {i+1}')
+                task_data['task_number'] = task_desc
                 task_data['assigned_agency'] = normalize_to_display_name(raw_officers, task_data.get('assigned_agency'))
-                task_data['description'] = ""
+                task_data['description'] = "" # Reset to empty as we use task_number for display
                 task_data['source'] = "VoiceBot"
                 task_data['allocated_date'] = today_str
                 
@@ -265,13 +262,11 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
                 # Limit context size (e.g. last 100 tasks or active ones)
                 context_tasks = all_tasks[-100:] 
                 
-                query_prompt = f"""
-                User Question: "{data.get('search_query', prompt_input)}"
+                context_json = json.dumps([{ 'task': t['task_number'], 'assigned': t['assigned_agency'], 'status': t['status'], 'deadline': t['deadline_date'] } for t in context_tasks])
                 
-                REAL-TIME TASK DATA (CONTEXT):
-                {json.dumps([{ 'task': t['task_number'], 'assigned': t['assigned_agency'], 'status': t['status'], 'deadline': t['deadline_date'] } for t in context_tasks])}
-                
-                INSTRUCTION:
+                query_prompt = "User Question: \"" + str(data.get('search_query', prompt_input)) + "\"\n\n"
+                query_prompt += "REAL-TIME TASK DATA (CONTEXT):\n" + context_json + "\n\n"
+                query_prompt += """INSTRUCTION:
                 Answer the user's question based ONLY on the provided context. 
                 Be concise and helpful. Use Markdown for formatting.
                 """
