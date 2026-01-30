@@ -373,11 +373,21 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
             resp = requests.put(put_url, json=updates)
             
             if resp.status_code == 200:
-                updated_task = resp.json()
+                # Fetch fresh data to match DB exactly
+                get_url = f"{API_URL}{task_id}"
+                fresh_resp = requests.get(get_url)
+                if fresh_resp.status_code == 200:
+                    updated_task = fresh_resp.json()
+                else:
+                    updated_task = resp.json() # Fallback
+
+                agency_disp = updated_task.get('assigned_agency') or "Unassigned"
+                deadline_disp = updated_task.get('deadline_date') or "No Deadline"
+                
                 await update.message.reply_text(
                     f"📝 **Task #{task_id} Updated!**\n"
-                    f"Agency: {updated_task.get('assigned_agency')}\n"
-                    f"Deadline: {updated_task.get('deadline_date')}"
+                    f"👤 Agency: {agency_disp}\n"
+                    f"📅 Deadline: {deadline_disp}"
                 )
             else:
                 await update.message.reply_text(f"❌ Update Failed: {resp.text}")
