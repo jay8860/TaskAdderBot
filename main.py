@@ -150,7 +150,8 @@ async def process_task_creation(update: Update, task_data: dict, officers_list: 
             
             reply = (
                 f"✅ **Task Created!**\n\n"
-                f"📝 **Task:** {created_task.get('task_number')}\n"
+                f"🆔 **Task ID:** {created_task.get('task_number')}\n"
+                f"📖 **Description:** {created_task.get('description')}\n"
                 f"👤 **Assigned:** {assigned_to or 'Unassigned'}\n"
                 f"📅 **Deadline:** {created_task.get('deadline_date') or 'No Deadline'}"
             )
