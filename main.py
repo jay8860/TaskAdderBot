@@ -150,7 +150,7 @@ async def process_task_creation(update: Update, task_data: dict, officers_list: 
             
             reply = (
                 f"✅ **Task Created!**\n\n"
-                f"📝 **Task:** {task_data.get('task_number')}\n"
+                f"📝 **Task:** {created_task.get('task_number')}\n"
                 f"👤 **Assigned:** {assigned_to or 'Unassigned'}\n"
                 f"📅 **Deadline:** {created_task.get('deadline_date') or 'No Deadline'}"
             )
@@ -233,9 +233,10 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
             await update.message.reply_text(f"🔍 Found {len(task_list)} task(s). Processing...")
             for i, task_data in enumerate(task_list):
                 task_desc = task_data.get('description', f'Task {i+1}')
-                task_data['task_number'] = task_desc
+                task_data['task_number'] = None # Let Backend Auto-Generate
                 task_data['assigned_agency'] = normalize_to_display_name(raw_officers, task_data.get('assigned_agency'))
-                task_data['description'] = "" # Reset to empty as we use task_number for display
+                if not task_data.get('description'):
+                    task_data['description'] = task_desc
                 task_data['source'] = "VoiceBot"
                 task_data['allocated_date'] = today_str
                 
