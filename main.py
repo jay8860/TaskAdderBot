@@ -184,20 +184,21 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
     intent_prompt += "VALID OFFICERS LIST:\n" + json.dumps(valid_officers_prompt) + "\n\n"
     intent_prompt += """INSTRUCTIONS:
     1. Detect INTENT: "CREATE" (log new task) or "QUERY" (ask about tasks).
-    2. TRANSLATION: If the user speaks in Hindi, you MUST translate it into a professional, grammatically correct English sentence.
-       - STRICT RULE: DO NOT use 'Hinglish' or transliterated Hindi (e.g., "bolna", "kar dena", "dega" are FORBIDDEN).
-       - INSTEAD Use proper English (e.g., "Instruct Steno to...", "Prepare a chart...", "By Monday...").
-       - EXAMPLE: If user says "Steno ko bolna chart bana de", you MUST return "Instruct Steno to prepare the chart."
+    2. TRANSLATION & CLARITY: 
+       - If input is Hindi, translate to professional English.
+       - If input is English, clear it up to be a concise task description.
+       - STRICT RULE: DO NOT use 'Hinglish' (e.g., "kar dena" -> "Do this").
     3. FOR "CREATE": Extract details into a JSON list.
-       - Description: The task description translated into MEANINGFUL, PROFESSIONAL English sentence.
-       - assigned_agency: You MUST return ONLY the "Official Display Name" (the part AFTER the '->' in the list).
-         * CRITICAL: If you match a person, use their Display Name. 
-         * EXAMPLE: If list says "Ramlal Korram -> Steno", return "Steno". Never return "Ramlal Korram".
-         * DEFAULT: Use "Steno" if unclear.
-       - deadline_date: YYYY-MM-DD.
-       - priority: High/Medium/Low.
+       - "description": The ACTUAL task content. 
+         * CRITICAL: Must be a full sentence (e.g., "Repair the school roof"). 
+         * NEVER return generic labels like "Task 1" or "New Task". 
+         * If the user replies to a message, treat the reply text as the task description.
+       - "assigned_agency": ONLY the "Official Display Name" from the list (part AFTER '->').
+         * Use "Steno" if unclear or no match found.
+       - "deadline_date": YYYY-MM-DD.
+       - "priority": High/Medium/Low.
     4. FOR "QUERY": Extract search parameters into a JSON object.
-       - search_query: The user's question translated into English.
+       - "search_query": The user's question translated into English.
 
     Return ONLY JSON:
     {
