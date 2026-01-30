@@ -139,7 +139,7 @@ async def notification_callback(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode='Markdown'
         )
 
-async def process_task_creation(update: Update, task_data: dict, officers_list: list):
+async def process_task_creation(update: Update, task_data: dict, officers_list: list, suppress_error: bool = False):
     """Helper to push task to API and handle notification flow."""
     try:
         response = requests.post(API_URL, json=task_data)
@@ -151,26 +151,21 @@ async def process_task_creation(update: Update, task_data: dict, officers_list: 
             reply = (
                 f"✅ **Task Created!**\n\n"
                 f"🆔 **Task ID:** {created_task.get('task_number')}\n"
-                f"📖 **Description:** {created_task.get('description')}\n"
                 f"👤 **Assigned:** {assigned_to or 'Unassigned'}\n"
                 f"📅 **Deadline:** {created_task.get('deadline_date') or 'No Deadline'}"
             )
             await update.message.reply_text(reply, parse_mode='Markdown')
-            
-            # --- NOTIFICATION FLOW DISABLED (User Request) ---
-            # if assigned_to:
-            #     name, mobile = find_officer_contact(officers_list, assigned_to)
-            #     if mobile:
-            #         logging.info(f"Notification skipped for {name} ({mobile}) as per config.")
-            #     else:
-            #         logging.info(f"No mobile found for {assigned_to}")
-            
+            return True
         else:
-            await update.message.reply_text(f"⚠️ Failed to create task via API.\nStatus: {response.status_code}\nError: {response.text}")
+            if not suppress_error:
+                await update.message.reply_text(f"⚠️ Failed to create task via API.\nStatus: {response.status_code}\nError: {response.text}")
+            return False
 
     except Exception as e:
          logging.error(f"API Push Error: {e}")
-         await update.message.reply_text(f"❌ Error saving task: {str(e)}")
+         if not suppress_error:
+             await update.message.reply_text(f"❌ Error saving task: {str(e)}")
+         return False
 
 
 async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = False, file_path: str = None):
@@ -235,10 +230,13 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
             await update.message.reply_text(f"🔍 Found {len(task_list)} task(s). Processing...")
             for i, task_data in enumerate(task_list):
                 task_desc = task_data.get('description', f'Task {i+1}')
-                task_data['task_number'] = None # Let Backend Auto-Generate
+                # New Logic: Use Description AS the Task ID (Column 2)
+                # Retry logic to handle duplicates by appending suffix (2), (3)...
+                success = False
+                original_desc = task_desc
+                
+                # Pre-processing fields
                 task_data['assigned_agency'] = normalize_to_display_name(raw_officers, task_data.get('assigned_agency'))
-                if not task_data.get('description'):
-                    task_data['description'] = task_desc
                 task_data['source'] = "VoiceBot"
                 task_data['allocated_date'] = today_str
                 
@@ -252,8 +250,22 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
                 else:
                     task_data['time_given'] = "7"
                     task_data['deadline_date'] = (d1 + datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+
+                # Retry Loop
+                for attempt in range(1, 6): # Try up to 5 times
+                    suffix = "" if attempt == 1 else f" ({attempt})"
+                    task_data['task_number'] = original_desc + suffix
+                    task_data['description'] = ""  # Clear description column as requested
+                    
+                    show_error = (attempt == 5) # Only show error on last attempt
+                    if await process_task_creation(update, task_data, raw_officers, suppress_error=not show_error):
+                        success = True
+                        break
+                    # If failed, loop continues to try next suffix
                 
-                await process_task_creation(update, task_data, raw_officers)
+                if not success:
+                    logging.warning(f"Failed to create task after retries: {original_desc}")
+                
                 await asyncio.sleep(0.5)
 
         elif intent == "QUERY":
