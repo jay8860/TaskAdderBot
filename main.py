@@ -5,13 +5,30 @@ import re
 import json
 import requests
 import datetime
+import base64
+from io import BytesIO
+from PIL import Image
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 import google.generativeai as genai
 
-# Load environment variables
-load_dotenv()
+def compress_image(file_path):
+    try:
+        if not file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+            return None
+            
+        with Image.open(file_path) as img:
+            img = img.convert("RGB")
+            img.thumbnail((400, 400)) # Low Res Thumbnail
+            
+            buffered = BytesIO()
+            img.save(buffered, format="JPEG", quality=50)
+            img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+            return f"data:image/jpeg;base64,{img_str}"
+    except Exception as e:
+        logging.error(f"Compression Error: {e}")
+        return None
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -170,7 +187,7 @@ async def process_task_creation(update: Update, task_data: dict, officers_list: 
          return False
 
 
-async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = False, file_path: str = None):
+async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = False, file_path: str = None, attachment_data: str = None):
     """Unified logic for voice and text processing."""
     today_str = datetime.date.today().strftime("%Y-%m-%d")
     year_str = datetime.date.today().year
@@ -243,6 +260,11 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
             await update.message.reply_text(f"🔍 Found {len(task_list)} task(s). Processing...")
             for i, task_data in enumerate(task_list):
                 task_desc = task_data.get('description', f'Task {i+1}')
+                
+                # Attachment Injection
+                if attachment_data:
+                    task_data['attachment_data'] = attachment_data
+
                 # New Logic: Use Description AS the Task ID (Column 2)
                 # Retry logic to handle duplicates by appending suffix (2), (3)...
                 success = False
@@ -346,10 +368,13 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_path = f"temp_doc_{user_id}_{int(datetime.datetime.now().timestamp())}{file_ext}"
         await file_obj.download_to_drive(file_path)
         
+        # Prepare Attachment Data (Thumbnail)
+        attachment_data = compress_image(file_path)
+        
         # Pass user caption as prompt input if present
         caption = update.message.caption or ""
         
-        await handle_core_logic(update, caption, is_voice=True, file_path=file_path)
+        await handle_core_logic(update, caption, is_voice=True, file_path=file_path, attachment_data=attachment_data)
         
     except Exception as e:
         await update.message.reply_text(f"❌ File Error: {e}")
