@@ -211,7 +211,15 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
     try:
         if is_voice and file_path:
              logging.info(f"Uploading {file_path} to Gemini...")
-             myfile = genai.upload_file(file_path, mime_type="audio/ogg")
+             
+             # Determine MIME type
+             mime_type = "audio/ogg" # Default for voice
+             if file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                 mime_type = "image/jpeg"
+             elif file_path.lower().endswith('.pdf'):
+                 mime_type = "application/pdf"
+                 
+             myfile = genai.upload_file(file_path, mime_type=mime_type)
              result = model.generate_content([myfile, intent_prompt])
         else:
              result = model.generate_content("Analyze this command: \"" + prompt_input + "\"\n\n" + intent_prompt)
@@ -311,6 +319,42 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Voice Error: {e}")
     finally:
         if file_path and os.path.exists(file_path): os.remove(file_path)
+
+async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    await update.message.reply_text("📄 Analyzing document...")
+    
+    try:
+        file_obj = None
+        file_ext = ""
+        
+        if update.message.photo:
+            file_obj = await update.message.photo[-1].get_file()
+            file_ext = ".jpg"
+        elif update.message.document:
+            file_obj = await update.message.document.get_file()
+            name = update.message.document.file_name
+            if name.lower().endswith('.pdf'):
+                file_ext = ".pdf"
+            else:
+                file_ext = ".jpg" # Fallback for images sent as files
+
+        if not file_obj:
+            await update.message.reply_text("❌ Unsupported file type.")
+            return
+
+        file_path = f"temp_doc_{user_id}_{int(datetime.datetime.now().timestamp())}{file_ext}"
+        await file_obj.download_to_drive(file_path)
+        
+        # Pass user caption as prompt input if present
+        caption = update.message.caption or ""
+        
+        await handle_core_logic(update, caption, is_voice=True, file_path=file_path)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ File Error: {e}")
+    finally:
+        if 'file_path' in locals() and os.path.exists(file_path): os.remove(file_path)
 
 async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles replies to bot messages for Edit/Delete."""
@@ -420,6 +464,7 @@ def main():
     
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.VOICE, voice_handler))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.Document.PDF | filters.Document.IMAGE, document_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     # Callback Handler
     application.add_handler(CallbackQueryHandler(notification_callback))
