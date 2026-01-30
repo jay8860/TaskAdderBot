@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import re
 import json
 import requests
 import datetime
@@ -151,6 +152,7 @@ async def process_task_creation(update: Update, task_data: dict, officers_list: 
             reply = (
                 f"✅ **Task Created!**\n\n"
                 f"🆔 **Task ID:** {created_task.get('task_number')}\n"
+                f"🔢 **Ref:** #{created_task.get('id')}\n"
                 f"👤 **Assigned:** {assigned_to or 'Unassigned'}\n"
                 f"📅 **Deadline:** {created_task.get('deadline_date') or 'No Deadline'}"
             )
@@ -302,10 +304,97 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         voice_file = await update.message.voice.get_file()
         await voice_file.download_to_drive(file_path)
         await handle_core_logic(update, "", is_voice=True, file_path=file_path)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Voice Error: {e}")
     finally:
         if file_path and os.path.exists(file_path): os.remove(file_path)
 
+async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles replies to bot messages for Edit/Delete."""
+    user_text = update.message.text
+    original_text = update.message.reply_to_message.text
+    
+    # 1. Extract Task Ref ID (Search for "Ref: #123")
+    match = re.search(r"Ref: #(\d+)", original_text)
+    if not match:
+        await update.message.reply_text("⚠️ I can't modify this task. It might be an old message without a Ref ID.")
+        return
+
+    task_id = match.group(1)
+    
+    # 2. Analyze Intent with Gemini
+    # Context: User is replying to a task confirmation.
+    prompt = f"""
+    The user is replying to a Task Confirmation for Ref #{task_id}.
+    User's Reply: "{user_text}"
+    
+    Determine if they want to DELETE the task or UPDATE it.
+    
+    INSTRUCTIONS:
+    - If "delete", "remove", "cancel", return JSON: {{ "action": "DELETE" }}
+    - If "change date", "assign to X", "fix typo", return JSON: {{ "action": "UPDATE", "fields": {{ ... }} }}
+      * For fields, map to: "task_number", "assigned_agency", "deadline_date" (YYYY-MM-DD), "description".
+      * If changing "assigned_agency", extract the probable name.
+      
+    Return ONLY valid JSON.
+    """
+    
+    try:
+        result = model.generate_content(prompt)
+        response_text = result.text.strip()
+        if response_text.startswith("```json"): response_text = response_text[7:-3].strip()
+        elif response_text.startswith("```"): response_text = response_text[3:-3].strip()
+        
+        intent = json.loads(response_text)
+        action = intent.get("action")
+        
+        if action == "DELETE":
+            # Call Delete API
+            del_url = f"{API_URL}{task_id}" # e.g. .../tasks/123
+            resp = requests.delete(del_url)
+            if resp.status_code == 200:
+                await update.message.reply_text(f"🗑️ **Task Ref #{task_id} Deleted.**")
+            else:
+                await update.message.reply_text(f"❌ Delete Failed: {resp.text}")
+                
+        elif action == "UPDATE":
+            updates = intent.get("fields", {})
+            if not updates:
+                await update.message.reply_text("⚠️ No changes detected.")
+                return
+                
+            # Normalize Assigned Agency if present
+            if "assigned_agency" in updates:
+                raw_officers = fetch_raw_officers()
+                updates["assigned_agency"] = normalize_to_display_name(raw_officers, updates["assigned_agency"])
+
+            # Call Update API (PUT)
+            put_url = f"{API_URL}{task_id}"
+            resp = requests.put(put_url, json=updates)
+            
+            if resp.status_code == 200:
+                updated_task = resp.json()
+                await update.message.reply_text(
+                    f"📝 **Task #{task_id} Updated!**\n"
+                    f"Agency: {updated_task.get('assigned_agency')}\n"
+                    f"Deadline: {updated_task.get('deadline_date')}"
+                )
+            else:
+                await update.message.reply_text(f"❌ Update Failed: {resp.text}")
+                
+        else:
+            await update.message.reply_text("❓ I didn't understand that modification.")
+            
+    except Exception as e:
+        logging.error(f"Reply Error: {e}")
+        await update.message.reply_text("❌ Failed to process update.")
+
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check if this is a reply to the bot
+    if update.message.reply_to_message and update.message.reply_to_message.from_user.is_bot:
+        await handle_reply_logic(update, context)
+        return
+
     await update.message.reply_text("✍️ Processing...")
     await handle_core_logic(update, update.message.text)
 
