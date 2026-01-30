@@ -181,7 +181,10 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
     intent_prompt = "You are a smart Task Assistant. Today is " + today_str + " (Year " + str(year_str) + ").\n\n"
     intent_prompt += "VALID OFFICERS LIST:\n" + json.dumps(valid_officers_prompt) + "\n\n"
     intent_prompt += """INSTRUCTIONS:
-    1. Detect INTENT: "CREATE" (log new task) or "QUERY" (ask about tasks).
+    1. Detect INTENT:
+       - IF input starts with 'Search' or 'Query' (case-insensitive) -> Intent is "QUERY".
+       - OTHERWISE -> Intent is "CREATE".
+       - STRICT RULE: Do not guess Query intent. If the keyword is missing, assume it is a Task Creation.
     2. TRANSLATION & CLARITY: 
        - If input is Hindi, translate to professional English.
        - If input is English, clear it up to be a concise task description.
