@@ -83,6 +83,33 @@ def normalize_to_display_name(officers, assigned_name):
         if name.lower() == target:
             return e.get('display_name', name)
             
+    # 3. Fuzzy/Token Match (Handle "Dmf Aditya" vs "Aditya DMF")
+    target_tokens = set(target.split())
+    for e in officers:
+        # Check Display Name Tokens
+        disp = e.get('display_name', '').strip()
+        disp_tokens = set(disp.lower().split())
+        if target_tokens == disp_tokens:
+             return disp
+        
+        # Check Name Tokens
+        name = e.get('name', '').strip()
+        name_tokens = set(name.lower().split())
+        if target_tokens == name_tokens:
+             return e.get('display_name', name)
+
+    # 4. Partial Match (Relaxed - if user says "Aditya" and we have "Aditya DMF")
+    # Only if target matches a significant part of the name
+    if len(target) > 3:
+        for e in officers:
+             disp = e.get('display_name', '').strip()
+             if target in disp.lower():
+                 return disp
+             
+             name = e.get('name', '').strip()
+             if target in name.lower():
+                 return e.get('display_name', name)
+
     return assigned_name # Fallback to original if no match found
 
 # --- CORE LOGIC ---
