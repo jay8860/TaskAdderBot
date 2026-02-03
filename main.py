@@ -140,9 +140,9 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
        - OTHERWISE -> Intent is "CREATE".
        - STRICT RULE: Do not guess Query intent. If the keyword is missing, assume it is a Task Creation.
     2. TRANSLATION & CLARITY: 
-       - If input is Hindi, translate to professional English.
+       - If input is Hindi, translate to professional English BUT PRESERVE specific names, places, and technical terms (Hinglish) if they are Proper Nouns. 
+       - Do not distort names (e.g., 'Darshan' -> 'Legis'). Keep them exact.
        - If input is English, clear it up to be a concise task description.
-       - STRICT RULE: DO NOT use 'Hinglish'.
     3. FOR "CREATE": Extract details into a JSON list.
        - "description": The ACTUAL task content. 
          * CRITICAL: Must be a full sentence. 
@@ -150,7 +150,7 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
        - "assigned_agency": ONLY the "Official Display Name" from the list (part AFTER '->').
          * Use "Steno" if unclear or no match found.
        - "deadline_date": YYYY-MM-DD.
-       - "priority": High/Medium/Low.
+       - "priority": "High" ONLY if user says "Urgent" or "High Priority". Otherwise "Medium".
     4. FOR "QUERY": Extract search parameters into a JSON object.
        - "search_query": The user's question translated into English.
 
@@ -344,22 +344,96 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await handle_core_logic(update, update.message.text)
 
 async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Minimal implementation for Edit/Delete
+    """Handles replies to bot messages for Edit/Delete."""
     user_text = update.message.text
     original_text = update.message.reply_to_message.text
+    
+    # 1. Extract Task Ref ID (Search for "Ref: #123")
     match = re.search(r"Ref: #(\d+)", original_text)
     if not match:
-        await update.message.reply_text("⚠️ I can't modify this task (No Ref ID).")
+        await update.message.reply_text("⚠️ I can't modify this task. It might be an old message without a Ref ID.")
         return
+
     task_id = match.group(1)
     
-    # Simple Delete Check
-    if "delete" in user_text.lower() or "remove" in user_text.lower():
-         del_url = f"{API_URL}{task_id}"
-         requests.delete(del_url)
-         await update.message.reply_text("🗑️ Deleted.")
-    else:
-         await update.message.reply_text("Only 'delete' supported in this minimal version for now.")
+    # 2. Analyze Intent with Gemini
+    # Context: User is replying to a task confirmation.
+    prompt = f"""
+    The user is replying to a Task Confirmation for Ref #{task_id}.
+    User's Reply: "{user_text}"
+    
+    Determine if they want to DELETE the task or UPDATE it.
+    
+    INSTRUCTIONS:
+    - If "delete", "remove", "cancel", return JSON: {{ "action": "DELETE" }}
+    - If "change date", "assign to X", "fix typo", "rename to Y", return JSON: {{ "action": "UPDATE", "fields": {{ ... }} }}
+      * For fields, map to: "task_number", "assigned_agency", "deadline_date" (YYYY-MM-DD), "description".
+      * If changing "assigned_agency", extract the probable name.
+      
+    Return ONLY valid JSON.
+    """
+    
+    try:
+        result = model.generate_content(prompt)
+        response_text = result.text.strip()
+        if response_text.startswith("```json"): response_text = response_text[7:-3].strip()
+        elif response_text.startswith("```"): response_text = response_text[3:-3].strip()
+        
+        intent = json.loads(response_text)
+        action = intent.get("action")
+        
+        if action == "DELETE":
+            # Call Delete API
+            del_url = f"{API_URL}{task_id}" # e.g. .../tasks/123
+            resp = requests.delete(del_url)
+            if resp.status_code == 200:
+                await update.message.reply_text(f"🗑️ **Task Ref #{task_id} Deleted.**")
+            else:
+                await update.message.reply_text(f"❌ Delete Failed: {resp.text}")
+                
+        elif action == "UPDATE":
+            updates = intent.get("fields", {})
+            if not updates:
+                await update.message.reply_text("⚠️ No changes detected.")
+                return
+                
+            # Normalize Assigned Agency if present
+            if "assigned_agency" in updates:
+                raw_officers = fetch_raw_officers()
+                updates["assigned_agency"] = normalize_to_display_name(raw_officers, updates["assigned_agency"])
+
+            # Call Update API (PUT)
+            put_url = f"{API_URL}{task_id}"
+            resp = requests.put(put_url, json=updates)
+            
+            if resp.status_code == 200:
+                # Fetch fresh data to match DB exactly
+                get_url = f"{API_URL}{task_id}"
+                fresh_resp = requests.get(get_url)
+                if fresh_resp.status_code == 200:
+                    updated_task = fresh_resp.json()
+                else:
+                    updated_task = resp.json() # Fallback
+
+                agency_disp = updated_task.get('assigned_agency') or "Unassigned"
+                deadline_disp = updated_task.get('deadline_date') or "No Deadline"
+                new_desc = updated_task.get('description') or ""
+                
+                await update.message.reply_text(
+                    f"📝 **Task #{task_id} Updated!**\n"
+                    f"📄 {new_desc}\n"
+                    f"👤 Agency: {agency_disp}\n"
+                    f"📅 Deadline: {deadline_disp}"
+                )
+            else:
+                await update.message.reply_text(f"❌ Update Failed: {resp.text}")
+                
+        else:
+            await update.message.reply_text("❓ I didn't understand that modification.")
+            
+    except Exception as e:
+        logging.error(f"Reply Error: {e}")
+        await update.message.reply_text("❌ Failed to process update. Try specifying 'change name to X'.")
 
 
 async def notification_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
