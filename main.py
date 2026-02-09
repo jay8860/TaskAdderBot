@@ -394,8 +394,11 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
     INSTRUCTIONS:
     - If "delete", "remove", "cancel", return JSON: {{ "action": "DELETE" }}
     - If "change date", "assign to X", "fix typo", "rename to Y", return JSON: {{ "action": "UPDATE", "fields": {{ ... }} }}
-      * For fields, map to: "task_number", "assigned_agency", "deadline_date" (YYYY-MM-DD), "description".
-      * If changing "assigned_agency", extract the probable name.
+      * IMPORTANT: If the user provides a new Title, Name, or Content without specifying "comment" or "note", map it to "task_number" (The Task Name).
+      * Map to "description" ONLY if user says "comment: ...", "note: ...", or adds extra details.
+      * Map to "assigned_agency" if user mentions a person/role.
+      * Map to "deadline_date" (YYYY-MM-DD) if user mentions a date.
+      * If user says "Change to: X", assume X is the new Task Name ("task_number").
       
     Return ONLY valid JSON.
     """
@@ -442,15 +445,17 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 else:
                     updated_task = resp.json() # Fallback
 
+                task_name_disp = updated_task.get('task_number') or "Untitled Task"
+                desc_disp = updated_task.get('description') or "-"
                 agency_disp = updated_task.get('assigned_agency') or "Unassigned"
                 deadline_disp = updated_task.get('deadline_date') or "No Deadline"
-                new_desc = updated_task.get('description') or ""
                 
                 await update.message.reply_text(
                     f"📝 **Task #{task_id} Updated!**\n"
-                    f"📄 {new_desc}\n"
-                    f"👤 Agency: {agency_disp}\n"
-                    f"📅 Deadline: {deadline_disp}"
+                    f"📌 **Task:** {task_name_disp}\n"
+                    f"💬 **Comment:** {desc_disp}\n"
+                    f"👤 **Agency:** {agency_disp}\n"
+                    f"📅 **Deadline:** {deadline_disp}"
                 )
             else:
                 await update.message.reply_text(f"❌ Update Failed: {resp.text}")
