@@ -7,6 +7,7 @@ import requests
 import datetime
 import base64
 from io import BytesIO
+from urllib.parse import urlsplit, urlunsplit
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
@@ -18,7 +19,41 @@ load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-API_URL = os.getenv("API_URL", "http://localhost:8000/tasks/")
+
+
+def _ensure_trailing_slash(url: str) -> str:
+    return (url or "").rstrip("/") + "/"
+
+
+def _derive_api_base(raw_url: str) -> str:
+    default_base = "http://localhost:8000/api"
+    text = (raw_url or "").strip()
+    if not text:
+        return default_base
+
+    # Accept API base, tasks URL, or app base.
+    parts = urlsplit(text)
+    if not parts.scheme or not parts.netloc:
+        return default_base
+
+    path = (parts.path or "").rstrip("/")
+    if path.endswith("/api/tasks"):
+        path = path[:-6]  # drop "/tasks"
+    elif not path.endswith("/api"):
+        api_idx = path.find("/api")
+        if api_idx >= 0:
+            path = path[:api_idx + 4]
+        else:
+            path = f"{path}/api" if path else "/api"
+
+    return urlunsplit((parts.scheme, parts.netloc, path, "", "")).rstrip("/")
+
+
+_raw_api_url = os.getenv("API_URL", "").strip()
+API_BASE_URL = _derive_api_base(_raw_api_url)
+TASKS_API_URL = _ensure_trailing_slash(os.getenv("TASKS_API_URL", f"{API_BASE_URL}/tasks"))
+EMPLOYEES_API_URL = _ensure_trailing_slash(os.getenv("EMPLOYEES_API_URL", f"{API_BASE_URL}/employees"))
+API_URL = TASKS_API_URL  # backward-compatible alias used throughout the file
 
 # Configure Logging
 logging.basicConfig(
@@ -33,14 +68,8 @@ model = genai.GenerativeModel('gemini-2.0-flash')
 # --- DYNAMIC CONFIGURATION ---
 def fetch_raw_officers():
     try:
-        base_url = API_URL.rsplit('/', 2)[0]
-        if not base_url.endswith("/api"):
-             base_url = "http://localhost:8000/api"
-        
-        emp_url = f"{base_url}/employees/"
-        logging.info(f"Fetching officers from {emp_url}")
-        
-        response = requests.get(emp_url, timeout=4)
+        logging.info(f"Fetching officers from {EMPLOYEES_API_URL}")
+        response = requests.get(EMPLOYEES_API_URL, timeout=8)
         if response.status_code == 200:
             return response.json()
     except Exception as e:
@@ -53,7 +82,7 @@ def get_officer_prompt_list(officers):
         return ["Me", "Others"]
     for e in officers:
         name = e.get('name', '').strip()
-        disp = e.get('display_name', '').strip()
+        disp = (e.get('display_username') or e.get('display_name') or "").strip()
         if name and disp:
              # FORMAT: Casual Name -> Official Display Name
              mapping.append(f"{name} -> {disp}")
@@ -73,7 +102,7 @@ def normalize_to_display_name(officers, assigned_name):
     
     # 1. Check if it's already a Display Name (Direct Match)
     for e in officers:
-        disp = e.get('display_name', '').strip()
+        disp = (e.get('display_username') or e.get('display_name') or "").strip()
         if disp.lower() == target:
             return disp
             
@@ -81,34 +110,34 @@ def normalize_to_display_name(officers, assigned_name):
     for e in officers:
         name = e.get('name', '').strip()
         if name.lower() == target:
-            return e.get('display_name', name)
+            return e.get('display_username') or e.get('display_name') or name
             
     # 3. Fuzzy/Token Match (Handle "Dmf Aditya" vs "Aditya DMF")
     target_tokens = set(target.split())
     for e in officers:
         # Check Display Name Tokens
-        disp = e.get('display_name', '').strip()
-        disp_tokens = set(disp.lower().split())
-        if target_tokens == disp_tokens:
-             return disp
+            disp = (e.get('display_username') or e.get('display_name') or "").strip()
+            disp_tokens = set(disp.lower().split())
+            if target_tokens == disp_tokens:
+                 return disp
         
         # Check Name Tokens
-        name = e.get('name', '').strip()
-        name_tokens = set(name.lower().split())
-        if target_tokens == name_tokens:
-             return e.get('display_name', name)
+            name = e.get('name', '').strip()
+            name_tokens = set(name.lower().split())
+            if target_tokens == name_tokens:
+                 return e.get('display_username') or e.get('display_name') or name
 
     # 4. Partial Match (Relaxed - if user says "Aditya" and we have "Aditya DMF")
     # Only if target matches a significant part of the name
     if len(target) > 3:
         for e in officers:
-             disp = e.get('display_name', '').strip()
+             disp = (e.get('display_username') or e.get('display_name') or "").strip()
              if target in disp.lower():
                  return disp
              
              name = e.get('name', '').strip()
              if target in name.lower():
-                 return e.get('display_name', name)
+                 return e.get('display_username') or e.get('display_name') or name
 
     return assigned_name # Fallback to original if no match found
 
@@ -117,7 +146,7 @@ def normalize_to_display_name(officers, assigned_name):
 async def process_task_creation(update: Update, task_data: dict, officers_list: list, suppress_error: bool = False):
     """Helper to push task to API and handle notification flow."""
     try:
-        response = requests.post(API_URL, json=task_data)
+        response = requests.post(API_URL, json=task_data, timeout=12)
         
         if response.status_code == 200 or response.status_code == 201:
             created_task = response.json()
@@ -268,7 +297,7 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
         elif intent == "QUERY":
             await update.message.reply_text("🔎 Searching database...")
             # Fetch all tasks for context
-            resp = requests.get(API_URL)
+            resp = requests.get(API_URL, timeout=12)
             if resp.status_code == 200:
                 all_tasks = resp.json()
                 context_tasks = all_tasks[-100:] 
@@ -415,7 +444,7 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if action == "DELETE":
             # Call Delete API
             del_url = f"{API_URL}{task_id}" # e.g. .../tasks/123
-            resp = requests.delete(del_url)
+            resp = requests.delete(del_url, timeout=12)
             if resp.status_code == 200:
                 await update.message.reply_text(f"🗑️ **Task Ref #{task_id} Deleted.**")
             else:
@@ -434,12 +463,12 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
             # Call Update API (PUT)
             put_url = f"{API_URL}{task_id}"
-            resp = requests.put(put_url, json=updates)
+            resp = requests.put(put_url, json=updates, timeout=12)
             
             if resp.status_code == 200:
                 # Fetch fresh data to match DB exactly
                 get_url = f"{API_URL}{task_id}"
-                fresh_resp = requests.get(get_url)
+                fresh_resp = requests.get(get_url, timeout=12)
                 if fresh_resp.status_code == 200:
                     updated_task = fresh_resp.json()
                 else:
@@ -480,6 +509,10 @@ def main():
     if not TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not found in .env")
         return
+
+    logging.info(f"API base URL: {API_BASE_URL}")
+    logging.info(f"Tasks API URL: {API_URL}")
+    logging.info(f"Employees API URL: {EMPLOYEES_API_URL}")
 
     application = ApplicationBuilder().token(TOKEN).build()
     
