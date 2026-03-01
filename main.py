@@ -53,6 +53,7 @@ _raw_api_url = os.getenv("API_URL", "").strip()
 API_BASE_URL = _derive_api_base(_raw_api_url)
 TASKS_API_URL = _ensure_trailing_slash(os.getenv("TASKS_API_URL", f"{API_BASE_URL}/tasks"))
 EMPLOYEES_API_URL = _ensure_trailing_slash(os.getenv("EMPLOYEES_API_URL", f"{API_BASE_URL}/employees"))
+FIELD_VISIT_NOTES_API_URL = os.getenv("FIELD_VISIT_NOTES_API_URL", f"{API_BASE_URL}/field-visits/planning-notes")
 API_URL = TASKS_API_URL  # backward-compatible alias used throughout the file
 
 # Configure Logging
@@ -175,6 +176,49 @@ def normalize_priority(value: str) -> str:
         return "Low"
     return "Normal"
 
+
+def _extract_field_visit_note(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    if re.match(r"^(fv)\b[:\-\s]*", raw, flags=re.IGNORECASE):
+        return re.sub(r"^(fv)\b[:\-\s]*", "", raw, flags=re.IGNORECASE).strip()
+    if re.match(r"^(field[\s_-]*visit)\b[:\-\s]*", raw, flags=re.IGNORECASE):
+        return re.sub(r"^(field[\s_-]*visit)\b[:\-\s]*", "", raw, flags=re.IGNORECASE).strip()
+    return ""
+
+
+def append_to_field_visit_notepad(note_line: str) -> tuple[bool, str]:
+    line = (note_line or "").strip()
+    if not line:
+        return False, "No field visit note text found."
+
+    try:
+        current_resp = requests.get(FIELD_VISIT_NOTES_API_URL, timeout=12)
+        current_note = ""
+        current_home_base = "Collectorate, Dantewada"
+        if current_resp.status_code == 200:
+            payload = current_resp.json() or {}
+            current_note = (payload.get("note_text") or "").strip()
+            current_home_base = (payload.get("home_base") or current_home_base).strip() or current_home_base
+
+        existing_lines = [ln.strip() for ln in current_note.splitlines() if ln.strip()]
+        if not any(ln.lower() == line.lower() for ln in existing_lines):
+            existing_lines.append(line)
+        updated_note = "\n".join(existing_lines)
+
+        save_resp = requests.put(
+            FIELD_VISIT_NOTES_API_URL,
+            json={"note_text": updated_note, "home_base": current_home_base},
+            timeout=12,
+        )
+        if save_resp.status_code in (200, 201):
+            return True, "Saved to Field Visit Planning Notepad."
+        return False, f"Notepad save failed ({save_resp.status_code}): {save_resp.text}"
+    except Exception as exc:
+        logging.error(f"Field visit notepad save error: {exc}")
+        return False, str(exc)
+
 # --- CORE LOGIC ---
 
 async def process_task_creation(update: Update, task_data: dict, officers_list: list, suppress_error: bool = False):
@@ -221,6 +265,17 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
     year_str = datetime.date.today().year
     raw_officers = fetch_raw_officers()
     valid_officers_prompt = get_officer_prompt_list(raw_officers)
+
+    inline_fv_note = _extract_field_visit_note(prompt_input or "")
+    if inline_fv_note:
+        ok, msg = append_to_field_visit_notepad(inline_fv_note)
+        if ok:
+            await update.message.reply_text(
+                f"✅ Field Visit note added.\n\nSaved line:\n- {inline_fv_note}"
+            )
+        else:
+            await update.message.reply_text(f"⚠️ Failed to save Field Visit note: {msg}")
+        return
     
     # 1. Intent Detection & Translation Prompt
     intent_prompt = "You are a smart Task Assistant. Today is " + today_str + " (Year " + str(year_str) + ").\n\n"
@@ -287,6 +342,16 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
             await update.message.reply_text(f"🔍 Found {len(task_list)} task(s). Processing...")
             for i, task_data in enumerate(task_list):
                 task_desc = task_data.get('description', f'Task {i+1}')
+                extracted_note = _extract_field_visit_note(task_desc)
+                if extracted_note:
+                    ok, msg = append_to_field_visit_notepad(extracted_note)
+                    if ok:
+                        await update.message.reply_text(
+                            f"✅ Field Visit note added from task line:\n- {extracted_note}"
+                        )
+                    else:
+                        await update.message.reply_text(f"⚠️ Failed to save Field Visit note: {msg}")
+                    continue
                 
                 # Attachment Injection (URL)
                 if attachment_data:
