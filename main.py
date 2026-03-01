@@ -90,6 +90,11 @@ def get_officer_prompt_list(officers):
              mapping.append(disp)
     return mapping
 
+
+def _officer_display_value(officer: dict) -> str:
+    return (officer.get('display_username') or officer.get('display_name') or "").strip()
+
+
 def normalize_to_display_name(officers, assigned_name):
     """
     Strictly maps any incoming name (casual or display) back to the official Display Name.
@@ -141,6 +146,35 @@ def normalize_to_display_name(officers, assigned_name):
 
     return assigned_name # Fallback to original if no match found
 
+
+def resolve_employee_assignment(officers, assigned_name):
+    """
+    Returns (assigned_agency_display, assigned_employee_id)
+    """
+    display_name = normalize_to_display_name(officers, assigned_name)
+    target = (display_name or "").strip().lower()
+    if not target:
+        return "", None
+
+    for e in officers:
+        disp = _officer_display_value(e).lower()
+        name = (e.get('name') or "").strip().lower()
+        if target == disp or target == name:
+            return _officer_display_value(e) or display_name, e.get('id')
+
+    return display_name, None
+
+
+def normalize_priority(value: str) -> str:
+    text = (value or "").strip().lower()
+    if text in {"critical", "p0"}:
+        return "Critical"
+    if text in {"high", "urgent", "p1"}:
+        return "High"
+    if text in {"low", "p3"}:
+        return "Low"
+    return "Normal"
+
 # --- CORE LOGIC ---
 
 async def process_task_creation(update: Update, task_data: dict, officers_list: list, suppress_error: bool = False):
@@ -150,7 +184,7 @@ async def process_task_creation(update: Update, task_data: dict, officers_list: 
         
         if response.status_code == 200 or response.status_code == 201:
             created_task = response.json()
-            assigned_to = created_task.get('assigned_agency')
+            assigned_to = created_task.get('assigned_employee_name') or created_task.get('assigned_agency')
             
             reply = (
                 f"✅ **Task Created!**\n\n"
@@ -206,7 +240,7 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
        - "assigned_agency": ONLY the "Official Display Name" from the list (part AFTER '->').
          * Use "Steno" if unclear or no match found.
        - "deadline_date": YYYY-MM-DD.
-       - "priority": "High" ONLY if user says "Urgent" or "High Priority". Otherwise "Medium".
+       - "priority": "High" ONLY if user says "Urgent" or "High Priority". Otherwise "Normal".
     4. FOR "QUERY": Extract search parameters into a JSON object.
        - "search_query": The user's question translated into English.
 
@@ -262,7 +296,10 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
                 original_desc = task_desc
                 
                 # Pre-processing fields
-                task_data['assigned_agency'] = normalize_to_display_name(raw_officers, task_data.get('assigned_agency'))
+                assigned_agency, assigned_employee_id = resolve_employee_assignment(raw_officers, task_data.get('assigned_agency'))
+                task_data['assigned_agency'] = assigned_agency or task_data.get('assigned_agency')
+                task_data['assigned_employee_id'] = assigned_employee_id
+                task_data['priority'] = normalize_priority(task_data.get('priority'))
                 task_data['source'] = "VoiceBot"
                 task_data['allocated_date'] = today_str
                 
@@ -277,11 +314,10 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
                     task_data['time_given'] = "7"
                     task_data['deadline_date'] = (d1 + datetime.timedelta(days=7)).strftime("%Y-%m-%d")
 
-                # Retry Loop
+                # Retry loop (network/API retry, not duplicate name retry)
                 for attempt in range(1, 6): # Try up to 5 times
-                    suffix = "" if attempt == 1 else f" ({attempt})"
-                    task_data['task_number'] = original_desc + suffix
-                    task_data['description'] = ""  # Clear description column
+                    task_data.pop('task_number', None)  # Let dashboard auto-generate Task #
+                    task_data['description'] = original_desc  # Dictated text should appear in Task/Description
                     
                     show_error = (attempt == 5)
                     if await process_task_creation(update, task_data, raw_officers, suppress_error=not show_error):
@@ -459,7 +495,9 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # Normalize Assigned Agency if present
             if "assigned_agency" in updates:
                 raw_officers = fetch_raw_officers()
-                updates["assigned_agency"] = normalize_to_display_name(raw_officers, updates["assigned_agency"])
+                assigned_agency, assigned_employee_id = resolve_employee_assignment(raw_officers, updates["assigned_agency"])
+                updates["assigned_agency"] = assigned_agency
+                updates["assigned_employee_id"] = assigned_employee_id
 
             # Call Update API (PUT)
             put_url = f"{API_URL}{task_id}"
