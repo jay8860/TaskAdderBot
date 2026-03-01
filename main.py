@@ -185,11 +185,12 @@ async def process_task_creation(update: Update, task_data: dict, officers_list: 
         if response.status_code == 200 or response.status_code == 201:
             created_task = response.json()
             assigned_to = created_task.get('assigned_employee_name') or created_task.get('assigned_agency')
+            task_name = (created_task.get('description') or task_data.get('description') or '').strip() or 'No description'
             
             reply = (
                 f"✅ **Task Created!**\n\n"
                 f"🆔 **Task ID:** {created_task.get('task_number')}\n"
-                f"🔢 **Ref:** #{created_task.get('id')}\n"
+                f"📝 **Task Name:** {task_name}\n"
                 f"👤 **Assigned:** {assigned_to or 'Unassigned'}\n"
                 f"📅 **Deadline:** {created_task.get('deadline_date') or 'No Deadline'}"
             )
