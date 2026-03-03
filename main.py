@@ -292,6 +292,55 @@ def append_to_field_visit_notepad(note_line: str) -> tuple[bool, str]:
         logging.error(f"Field visit notepad save error: {exc}")
         return False, str(exc)
 
+
+def _extract_task_identifiers_from_message(message_text: str) -> tuple[str | None, str | None]:
+    text = (message_text or "").replace("*", "")
+    legacy_ref = None
+    task_number = None
+
+    ref_match = re.search(r"(?:Ref|Task Ref)\s*:?\s*#?(\d+)", text, flags=re.IGNORECASE)
+    if ref_match:
+        legacy_ref = ref_match.group(1).strip()
+
+    id_match = re.search(r"Task ID\s*:?\s*([A-Za-z0-9._-]+)", text, flags=re.IGNORECASE)
+    if id_match:
+        task_number = id_match.group(1).strip()
+
+    return legacy_ref, task_number
+
+
+def _resolve_task_db_id(legacy_ref: str | None, task_number: str | None) -> tuple[int | None, str | None]:
+    if legacy_ref and str(legacy_ref).isdigit():
+        return int(legacy_ref), task_number
+
+    lookup = (task_number or "").strip()
+    if not lookup:
+        return None, task_number
+
+    try:
+        resp = requests.get(API_URL, params={"search": lookup}, timeout=12)
+        if resp.status_code != 200:
+            logging.error(f"Task lookup failed ({resp.status_code}): {resp.text}")
+            return None, task_number
+
+        payload = resp.json()
+        tasks = payload if isinstance(payload, list) else []
+        if not tasks:
+            return None, task_number
+
+        exact = [
+            t for t in tasks
+            if str(t.get("task_number") or "").strip().lower() == lookup.lower()
+        ]
+        chosen = exact[0] if exact else (tasks[0] if len(tasks) == 1 else None)
+        if not chosen or not chosen.get("id"):
+            return None, task_number
+
+        return int(chosen["id"]), (chosen.get("task_number") or task_number)
+    except Exception as exc:
+        logging.error(f"Task lookup exception for Task ID '{lookup}': {exc}")
+        return None, task_number
+
 # --- CORE LOGIC ---
 
 async def process_task_creation(update: Update, task_data: dict, officers_list: list, suppress_error: bool = False):
@@ -579,18 +628,22 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_text = update.message.text
     original_text = update.message.reply_to_message.text
     
-    # 1. Extract Task Ref ID (Search for "Ref: #123")
-    match = re.search(r"Ref: #(\d+)", original_text)
-    if not match:
-        await update.message.reply_text("⚠️ I can't modify this task. It might be an old message without a Ref ID.")
+    # 1. Extract Task identity (new format Task ID, old format Ref).
+    legacy_ref, task_number = _extract_task_identifiers_from_message(original_text)
+    task_db_id, resolved_task_number = _resolve_task_db_id(legacy_ref, task_number)
+    if not task_db_id:
+        await update.message.reply_text(
+            "⚠️ I can't identify this task from the replied message. "
+            "Reply to a recent bot confirmation that includes Task ID."
+        )
         return
 
-    task_id = match.group(1)
+    task_display_id = resolved_task_number or (f"Ref #{legacy_ref}" if legacy_ref else f"DB #{task_db_id}")
     
     # 2. Analyze Intent with Gemini
     # Context: User is replying to a task confirmation.
     prompt = f"""
-    The user is replying to a Task Confirmation for Ref #{task_id}.
+    The user is replying to a Task Confirmation for Task ID "{task_display_id}" (DB id {task_db_id}).
     User's Reply: "{user_text}"
     
     Determine if they want to DELETE the task or UPDATE it.
@@ -598,11 +651,11 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
     INSTRUCTIONS:
     - If "delete", "remove", "cancel", return JSON: {{ "action": "DELETE" }}
     - If "change date", "assign to X", "fix typo", "rename to Y", return JSON: {{ "action": "UPDATE", "fields": {{ ... }} }}
-      * IMPORTANT: If the user provides a new Title, Name, or Content without specifying "comment" or "note", map it to "task_number" (The Task Name).
-      * Map to "description" ONLY if user says "comment: ...", "note: ...", or adds extra details.
+      * IMPORTANT: If the user provides a new Title, Name, or Content, map it to "description" (Task Name column).
+      * Map comment-like additions to "steno_comment".
       * Map to "assigned_agency" if user mentions a person/role.
       * Map to "deadline_date" (YYYY-MM-DD) if user mentions a date.
-      * If user says "Change to: X", assume X is the new Task Name ("task_number").
+      * If user says "Change to: X", assume X is the new Task Name ("description").
       
     Return ONLY valid JSON.
     """
@@ -618,10 +671,10 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         if action == "DELETE":
             # Call Delete API
-            del_url = f"{API_URL}{task_id}" # e.g. .../tasks/123
+            del_url = f"{API_URL}{task_db_id}" # e.g. .../tasks/123
             resp = requests.delete(del_url, timeout=12)
             if resp.status_code == 200:
-                await update.message.reply_text(f"🗑️ **Task Ref #{task_id} Deleted.**")
+                await update.message.reply_text(f"🗑️ **Task {task_display_id} Deleted.**")
             else:
                 await update.message.reply_text(f"❌ Delete Failed: {resp.text}")
                 
@@ -639,27 +692,26 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 updates["assigned_employee_id"] = assigned_employee_id
 
             # Call Update API (PUT)
-            put_url = f"{API_URL}{task_id}"
+            put_url = f"{API_URL}{task_db_id}"
             resp = requests.put(put_url, json=updates, timeout=12)
             
             if resp.status_code == 200:
                 # Fetch fresh data to match DB exactly
-                get_url = f"{API_URL}{task_id}"
+                get_url = f"{API_URL}{task_db_id}"
                 fresh_resp = requests.get(get_url, timeout=12)
                 if fresh_resp.status_code == 200:
                     updated_task = fresh_resp.json()
                 else:
                     updated_task = resp.json() # Fallback
 
-                task_name_disp = updated_task.get('task_number') or "Untitled Task"
-                desc_disp = updated_task.get('description') or "-"
+                task_name_disp = updated_task.get('description') or "-"
+                task_id_disp = updated_task.get('task_number') or task_display_id
                 agency_disp = updated_task.get('assigned_agency') or "Unassigned"
                 deadline_disp = updated_task.get('deadline_date') or "No Deadline"
                 
                 await update.message.reply_text(
-                    f"📝 **Task #{task_id} Updated!**\n"
-                    f"📌 **Task:** {task_name_disp}\n"
-                    f"💬 **Comment:** {desc_disp}\n"
+                    f"📝 **Task {task_id_disp} Updated!**\n"
+                    f"📌 **Task Name:** {task_name_disp}\n"
                     f"👤 **Agency:** {agency_disp}\n"
                     f"📅 **Deadline:** {deadline_disp}"
                 )
