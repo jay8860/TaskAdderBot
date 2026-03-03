@@ -19,6 +19,7 @@ load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL_RAW = (os.getenv("GEMINI_MODEL") or os.getenv("GEMINI_MODEL_NAME") or "").strip()
 
 
 def _ensure_trailing_slash(url: str) -> str:
@@ -64,7 +65,79 @@ logging.basicConfig(
 
 # Configure Gemini
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.0-flash')
+
+
+def _normalize_gemini_model_name(raw_name: str) -> str:
+    text = (raw_name or "").strip()
+    if not text:
+        return ""
+
+    lowered = text.lower().strip()
+    if lowered.startswith("models/"):
+        lowered = lowered[len("models/"):]
+    lowered = lowered.replace("_", "-").replace(" ", "-")
+    lowered = re.sub(r"-+", "-", lowered).strip("-")
+
+    aliases = {
+        "gemini-2-5-flash": "gemini-2.5-flash",
+        "gemini-2-5-pro": "gemini-2.5-pro",
+        "gemini-1-5-flash": "gemini-1.5-flash",
+        "gemini-1-5-pro": "gemini-1.5-pro",
+        "2-5-flash": "gemini-2.5-flash",
+        "2-5-pro": "gemini-2.5-pro",
+    }
+    if lowered in aliases:
+        return aliases[lowered]
+
+    if "2.5" in lowered and "flash" in lowered:
+        return "gemini-2.5-flash"
+    if "2.5" in lowered and "pro" in lowered:
+        return "gemini-2.5-pro"
+
+    return lowered
+
+
+def _build_gemini_models():
+    candidates = [
+        GEMINI_MODEL_RAW,
+        os.getenv("GEMINI_MODEL_NAME", ""),
+        "gemini-2.5-flash",
+        "gemini-1.5-flash",
+    ]
+    unique = []
+    for raw in candidates:
+        normalized = _normalize_gemini_model_name(raw)
+        if normalized and normalized not in unique:
+            unique.append(normalized)
+
+    models = []
+    for name in unique:
+        try:
+            models.append((name, genai.GenerativeModel(name)))
+        except Exception as exc:
+            logging.warning(f"Gemini model init failed for '{name}': {exc}")
+
+    if not models:
+        # Last-resort hard fallback so bot still runs.
+        fallback = "gemini-1.5-flash"
+        models.append((fallback, genai.GenerativeModel(fallback)))
+    return models
+
+
+GEMINI_MODELS = _build_gemini_models()
+
+
+def generate_with_gemini(contents):
+    last_error = None
+    for model_name, model_obj in GEMINI_MODELS:
+        try:
+            logging.info(f"Gemini generate_content with model={model_name}")
+            return model_obj.generate_content(contents)
+        except Exception as exc:
+            last_error = exc
+            logging.warning(f"Gemini call failed for model={model_name}: {exc}")
+            continue
+    raise last_error if last_error else RuntimeError("Gemini generation failed")
 
 # --- DYNAMIC CONFIGURATION ---
 def fetch_raw_officers():
@@ -319,9 +392,9 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
                  mime_type = "application/pdf"
                  
              myfile = genai.upload_file(file_path, mime_type=mime_type)
-             result = model.generate_content([myfile, intent_prompt])
+             result = generate_with_gemini([myfile, intent_prompt])
         else:
-             result = model.generate_content("Analyze this command: \"" + prompt_input + "\"\n\n" + intent_prompt)
+             result = generate_with_gemini("Analyze this command: \"" + prompt_input + "\"\n\n" + intent_prompt)
              
         response_text = result.text.strip()
         if response_text.startswith("```json"): response_text = response_text[7:-3].strip()
@@ -411,7 +484,7 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
                 Answer the user's question based ONLY on the provided context. 
                 Be concise and helpful. Use Markdown for formatting.
                 """
-                answer = model.generate_content(query_prompt)
+                answer = generate_with_gemini(query_prompt)
                 await update.message.reply_text(answer.text, parse_mode='Markdown')
             else:
                 await update.message.reply_text("❌ Failed to fetch task data for search.")
@@ -535,7 +608,7 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """
     
     try:
-        result = model.generate_content(prompt)
+        result = generate_with_gemini(prompt)
         response_text = result.text.strip()
         if response_text.startswith("```json"): response_text = response_text[7:-3].strip()
         elif response_text.startswith("```"): response_text = response_text[3:-3].strip()
@@ -617,6 +690,7 @@ def main():
     logging.info(f"API base URL: {API_BASE_URL}")
     logging.info(f"Tasks API URL: {API_URL}")
     logging.info(f"Employees API URL: {EMPLOYEES_API_URL}")
+    logging.info(f"Gemini model candidates: {[name for name, _ in GEMINI_MODELS]}")
 
     application = ApplicationBuilder().token(TOKEN).build()
     
