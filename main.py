@@ -341,6 +341,130 @@ def _resolve_task_db_id(legacy_ref: str | None, task_number: str | None) -> tupl
         logging.error(f"Task lookup exception for Task ID '{lookup}': {exc}")
         return None, task_number
 
+
+def _normalize_text_spaces(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip()).strip()
+
+
+def _parse_date_text_to_iso(value: str) -> str | None:
+    text = _normalize_text_spaces(value).rstrip(".,;:")
+    if not text:
+        return None
+
+    # Common explicit formats first.
+    formats = [
+        "%Y-%m-%d",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%d.%m.%Y",
+        "%d %b %Y",
+        "%d %B %Y",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.datetime.strptime(text, fmt).date().strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+    # dd/mm or dd-mm without year -> current year.
+    m = re.match(r"^(\d{1,2})[/-](\d{1,2})$", text)
+    if m:
+        day = int(m.group(1))
+        month = int(m.group(2))
+        try:
+            d = datetime.date(datetime.date.today().year, month, day)
+            return d.strftime("%Y-%m-%d")
+        except Exception:
+            return None
+
+    # Numeric with optional year.
+    m2 = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$", text)
+    if m2:
+        day = int(m2.group(1))
+        month = int(m2.group(2))
+        year = int(m2.group(3))
+        if year < 100:
+            year += 2000
+        try:
+            d = datetime.date(year, month, day)
+            return d.strftime("%Y-%m-%d")
+        except Exception:
+            return None
+
+    return None
+
+
+def _deterministic_reply_intent(user_text: str) -> dict | None:
+    text = _normalize_text_spaces(user_text)
+    lowered = text.lower()
+    if not text:
+        return None
+
+    if re.search(r"\b(delete|remove|cancel)\b", lowered) and not re.search(r"\bdon't\b|\bdo not\b", lowered):
+        return {"action": "DELETE"}
+
+    fields: dict = {}
+
+    # Assignment updates
+    assign_patterns = [
+        r"change\s+assigned\s+to\s+(.+)$",
+        r"assign(?:ed)?\s+(?:it|this|task)?\s*to\s+(.+)$",
+        r"allocate\s+(?:it|this|task)?\s*to\s+(.+)$",
+    ]
+    for pat in assign_patterns:
+        m = re.search(pat, lowered, flags=re.IGNORECASE)
+        if m:
+            candidate = _normalize_text_spaces(m.group(1)).rstrip(".,;:")
+            if candidate:
+                fields["assigned_agency"] = candidate
+            break
+
+    # Deadline updates
+    extend_match = re.search(r"extend\s+(?:deadline\s+)?by\s+(\d+)\s+day", lowered, flags=re.IGNORECASE)
+    if extend_match:
+        delta_days = int(extend_match.group(1))
+        fields["deadline_date"] = (datetime.date.today() + datetime.timedelta(days=delta_days)).strftime("%Y-%m-%d")
+    else:
+        deadline_patterns = [
+            r"(?:deadline|due(?:\s+date)?)\s*(?:to|as)?\s*[:\-]?\s*(.+)$",
+            r"\bby\s+(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)$",
+        ]
+        for pat in deadline_patterns:
+            m = re.search(pat, text, flags=re.IGNORECASE)
+            if m:
+                parsed = _parse_date_text_to_iso(m.group(1))
+                if parsed:
+                    fields["deadline_date"] = parsed
+                    break
+
+    # Task name / description updates
+    name_patterns = [
+        r"change\s+(?:the\s+)?task\s+name\s+to\s+(.+)$",
+        r"rename\s+(?:the\s+)?task\s+to\s+(.+)$",
+        r"rename\s+to\s+(.+)$",
+        r"change\s+name\s+to\s+(.+)$",
+        r"set\s+task\s+name\s+as\s+(.+)$",
+    ]
+    for pat in name_patterns:
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if m:
+            new_name = _normalize_text_spaces(m.group(1)).rstrip(".,;:")
+            if new_name:
+                fields["description"] = new_name
+            break
+
+    # Generic fallback phrase if clearly intended as task rename.
+    if not fields.get("description") and not fields.get("assigned_agency") and not fields.get("deadline_date"):
+        m = re.search(r"^change\s+to\s+(.+)$", text, flags=re.IGNORECASE)
+        if m:
+            new_name = _normalize_text_spaces(m.group(1)).rstrip(".,;:")
+            if new_name:
+                fields["description"] = new_name
+
+    if fields:
+        return {"action": "UPDATE", "fields": fields}
+    return None
+
 # --- CORE LOGIC ---
 
 async def process_task_creation(update: Update, task_data: dict, officers_list: list, suppress_error: bool = False):
@@ -640,8 +764,10 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     task_display_id = resolved_task_number or (f"Ref #{legacy_ref}" if legacy_ref else f"DB #{task_db_id}")
     
-    # 2. Analyze Intent with Gemini
-    # Context: User is replying to a task confirmation.
+    # 2. First try deterministic parser for common commands.
+    intent = _deterministic_reply_intent(user_text)
+
+    # 3. Fallback to Gemini for complex instructions.
     prompt = f"""
     The user is replying to a Task Confirmation for Task ID "{task_display_id}" (DB id {task_db_id}).
     User's Reply: "{user_text}"
@@ -661,12 +787,12 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """
     
     try:
-        result = generate_with_gemini(prompt)
-        response_text = result.text.strip()
-        if response_text.startswith("```json"): response_text = response_text[7:-3].strip()
-        elif response_text.startswith("```"): response_text = response_text[3:-3].strip()
-        
-        intent = json.loads(response_text)
+        if not intent:
+            result = generate_with_gemini(prompt)
+            response_text = result.text.strip()
+            if response_text.startswith("```json"): response_text = response_text[7:-3].strip()
+            elif response_text.startswith("```"): response_text = response_text[3:-3].strip()
+            intent = json.loads(response_text)
         action = intent.get("action")
         
         if action == "DELETE":
