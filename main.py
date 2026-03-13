@@ -21,6 +21,15 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL_RAW = (os.getenv("GEMINI_MODEL") or os.getenv("GEMINI_MODEL_NAME") or "").strip()
 
+DEPRECATED_GEMINI_MODEL_REPLACEMENTS = {
+    "gemini-2.0-flash": "gemini-2.5-flash",
+    "gemini-2.0-flash-001": "gemini-2.5-flash",
+    "gemini-2.0-flash-lite": "gemini-2.5-flash-lite",
+    "gemini-2.0-flash-lite-001": "gemini-2.5-flash-lite",
+    "gemini-1.5-flash": "gemini-2.5-flash",
+    "gemini-1.5-pro": "gemini-2.5-pro",
+}
+
 
 def _ensure_trailing_slash(url: str) -> str:
     return (url or "").rstrip("/") + "/"
@@ -80,18 +89,39 @@ def _normalize_gemini_model_name(raw_name: str) -> str:
 
     aliases = {
         "gemini-2-5-flash": "gemini-2.5-flash",
+        "gemini-2-5-flash-lite": "gemini-2.5-flash-lite",
         "gemini-2-5-pro": "gemini-2.5-pro",
         "gemini-1-5-flash": "gemini-1.5-flash",
         "gemini-1-5-pro": "gemini-1.5-pro",
+        "gemini-2-0-flash": "gemini-2.0-flash",
+        "gemini-2-0-flash-lite": "gemini-2.0-flash-lite",
         "2-5-flash": "gemini-2.5-flash",
+        "2-5-flash-lite": "gemini-2.5-flash-lite",
         "2-5-pro": "gemini-2.5-pro",
+        "2-0-flash": "gemini-2.0-flash",
+        "2-0-flash-lite": "gemini-2.0-flash-lite",
     }
     if lowered in aliases:
-        return aliases[lowered]
+        lowered = aliases[lowered]
+
+    replacement = DEPRECATED_GEMINI_MODEL_REPLACEMENTS.get(lowered)
+    if replacement:
+        logging.warning(f"Replacing deprecated Gemini model '{lowered}' with '{replacement}'")
+        return replacement
 
     if "2.5" in lowered and "flash" in lowered:
+        if "lite" in lowered:
+            return "gemini-2.5-flash-lite"
         return "gemini-2.5-flash"
     if "2.5" in lowered and "pro" in lowered:
+        return "gemini-2.5-pro"
+    if "2.0" in lowered and "flash" in lowered:
+        if "lite" in lowered:
+            return "gemini-2.5-flash-lite"
+        return "gemini-2.5-flash"
+    if "1.5" in lowered and "flash" in lowered:
+        return "gemini-2.5-flash"
+    if "1.5" in lowered and "pro" in lowered:
         return "gemini-2.5-pro"
 
     return lowered
@@ -102,7 +132,8 @@ def _build_gemini_models():
         GEMINI_MODEL_RAW,
         os.getenv("GEMINI_MODEL_NAME", ""),
         "gemini-2.5-flash",
-        "gemini-1.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-pro",
     ]
     unique = []
     for raw in candidates:
@@ -119,7 +150,7 @@ def _build_gemini_models():
 
     if not models:
         # Last-resort hard fallback so bot still runs.
-        fallback = "gemini-1.5-flash"
+        fallback = "gemini-2.5-flash"
         models.append((fallback, genai.GenerativeModel(fallback)))
     return models
 
