@@ -686,10 +686,13 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
                 query_prompt += "REAL-TIME TASK DATA (CONTEXT):\n" + context_json + "\n\n"
                 query_prompt += """INSTRUCTION:
                 Answer the user's question based ONLY on the provided context. 
-                Be concise and helpful. Use Markdown for formatting.
+                Be concise and helpful. Use plain text only. Do not use Markdown or HTML formatting.
                 """
                 answer = generate_with_gemini(query_prompt)
-                await update.message.reply_text(answer.text, parse_mode='Markdown')
+                answer_text = (getattr(answer, "text", None) or "").strip()
+                if not answer_text:
+                    answer_text = "No matching tasks found."
+                await update.message.reply_text(answer_text)
             else:
                 await update.message.reply_text("❌ Failed to fetch task data for search.")
 
