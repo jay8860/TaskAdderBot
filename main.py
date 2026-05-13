@@ -300,6 +300,64 @@ def resolve_employee_assignment(officers, assigned_name):
     return display_name, None
 
 
+def _normalize_text_for_match(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+
+
+def _designation_blob(officer: dict) -> str:
+    disp = _officer_display_value(officer) or ""
+    name = (officer.get("name") or "").strip()
+    return _normalize_text_for_match(f"{disp} {name}")
+
+
+def infer_employee_by_topic(officers: list, task_text: str) -> tuple[str | None, int | None]:
+    """
+    Deterministic topic->designation routing to avoid defaulting to Steno.
+    Returns (display_username, employee_id)
+    """
+    text = _normalize_text_for_match(task_text)
+    if not text or not officers:
+        return None, None
+
+    # Rules: (topic keywords) -> (designation keywords to match in officer display/name)
+    rules = [
+        (["borewell", "handpump", "hand pump", "water", "pipeline", "piped", "jal", "tap", "drinking water", "p h e", "phe"], ["phe"]),
+        (["solar", "panel", "creda", "inverter", "street light", "streetlight"], ["creda", "solar"]),
+        (["electric", "electricity", "transformer", "pole", "meter", "power"], ["cseb", "electric", "power", "creda"]),
+        (["road", "bridge", "culvert", "pothole", "pmgsy", "pwd"], ["pmgsy", "pwd", "road"]),
+        (["school", "teacher", "attendance", "education", "deo", "adso"], ["deo", "education", "adso"]),
+        (["anganwadi", "icds", "nutrition", "wcd", "women", "child"], ["wcd", "icds"]),
+        (["health", "hospital", "phc", "chc", "doctor", "medicine"], ["health", "cmho", "bmo"]),
+        (["ration", "pds", "food", "supply", "fair price"], ["food", "civil supplies", "pds"]),
+        (["police", "fir", "law and order"], ["police"]),
+    ]
+
+    def score_officer(off: dict, want: list[str]) -> int:
+        blob = _designation_blob(off)
+        score = 0
+        for kw in want:
+            if kw in blob:
+                score += 2
+        return score
+
+    for topics, want_designation in rules:
+        if any(t in text for t in topics):
+            best = None
+            best_score = 0
+            for off in officers:
+                if not isinstance(off, dict) or not off.get("id"):
+                    continue
+                s = score_officer(off, want_designation)
+                if s > best_score:
+                    best = off
+                    best_score = s
+            if best and best_score > 0:
+                disp = _officer_display_value(best)
+                return (disp or None), best.get("id")
+
+    return None, None
+
+
 def normalize_priority(value: str) -> str:
     text = (value or "").strip().lower()
     if text in {"critical", "p0"}:
@@ -713,6 +771,11 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
                 
                 # Pre-processing fields
                 assigned_agency, assigned_employee_id = resolve_employee_assignment(raw_officers, task_data.get('assigned_agency'))
+                if not assigned_employee_id:
+                    inferred_disp, inferred_id = infer_employee_by_topic(raw_officers, task_desc or "")
+                    if inferred_id:
+                        assigned_agency = inferred_disp or assigned_agency
+                        assigned_employee_id = inferred_id
                 task_data['assigned_agency'] = assigned_agency or task_data.get('assigned_agency')
                 task_data['assigned_employee_id'] = assigned_employee_id
                 task_data['priority'] = normalize_priority(task_data.get('priority'))
@@ -935,6 +998,11 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if "assigned_agency" in updates:
                 raw_officers = fetch_raw_officers()
                 assigned_agency, assigned_employee_id = resolve_employee_assignment(raw_officers, updates["assigned_agency"])
+                if not assigned_employee_id:
+                    inferred_disp, inferred_id = infer_employee_by_topic(raw_officers, updates.get("description") or "")
+                    if inferred_id:
+                        assigned_agency = inferred_disp or assigned_agency
+                        assigned_employee_id = inferred_id
                 updates["assigned_agency"] = assigned_agency
                 updates["assigned_employee_id"] = assigned_employee_id
 
