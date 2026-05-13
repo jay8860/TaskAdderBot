@@ -367,6 +367,12 @@ def _extract_task_identifiers_from_message(message_text: str) -> tuple[str | Non
     if id_match:
         task_number = id_match.group(1).strip()
 
+    # Fallback: match common dashboard task_number patterns like ABC-001
+    if not task_number:
+        tn_match = re.search(r"\b([A-Z]{2,8}-\d{2,6})\b", text)
+        if tn_match:
+            task_number = tn_match.group(1).strip()
+
     return legacy_ref, task_number
 
 
@@ -900,7 +906,14 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
             response_text = result.text.strip()
             if response_text.startswith("```json"): response_text = response_text[7:-3].strip()
             elif response_text.startswith("```"): response_text = response_text[3:-3].strip()
-            intent = json.loads(response_text)
+            try:
+                intent = json.loads(response_text)
+            except Exception:
+                # Occasionally the model returns a little prose around JSON. Try to salvage the first JSON object.
+                m = re.search(r"\{[\s\S]*\}", response_text)
+                if not m:
+                    raise
+                intent = json.loads(m.group(0))
         action = intent.get("action")
         
         if action == "DELETE":
@@ -950,14 +963,20 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     f"📅 **Deadline:** {deadline_disp}"
                 )
             else:
-                await update.message.reply_text(f"❌ Update Failed: {resp.text}")
+                await update.message.reply_text(f"❌ Update Failed ({resp.status_code}): {resp.text}")
                 
         else:
             await update.message.reply_text("❓ I didn't understand that modification.")
             
     except Exception as e:
         logging.exception(f"Reply Error: {e}")
-        await update.message.reply_text("❌ Failed to process update. Please use: delete | change task name to X | change assigned to Y | deadline to DD/MM/YYYY")
+        await update.message.reply_text(
+            "❌ Failed to process update.\n"
+            "Try replying with one of these:\n"
+            "- Change task name to <text>\n"
+            "- Assign to <person/role>\n"
+            "- Deadline to DD/MM/YYYY"
+        )
 
 
 async def notification_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
