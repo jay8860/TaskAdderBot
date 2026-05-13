@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 import google.generativeai as genai
+from PIL import Image
 from drive_uploader import upload_to_drive
 
 # Load environment variables
@@ -65,6 +66,9 @@ TASKS_API_URL = _ensure_trailing_slash(os.getenv("TASKS_API_URL", f"{API_BASE_UR
 EMPLOYEES_API_URL = _ensure_trailing_slash(os.getenv("EMPLOYEES_API_URL", f"{API_BASE_URL}/employees"))
 FIELD_VISIT_NOTES_API_URL = os.getenv("FIELD_VISIT_NOTES_API_URL", f"{API_BASE_URL}/field-visits/planning-notes")
 API_URL = TASKS_API_URL  # backward-compatible alias used throughout the file
+
+def _tasks_image_upload_url(task_id: int) -> str:
+    return f"{API_BASE_URL}/tasks/{task_id}/image"
 
 # Configure Logging
 logging.basicConfig(
@@ -176,7 +180,19 @@ def fetch_raw_officers():
         logging.info(f"Fetching officers from {EMPLOYEES_API_URL}")
         response = requests.get(EMPLOYEES_API_URL, timeout=8)
         if response.status_code == 200:
-            return response.json()
+            payload = response.json()
+            if isinstance(payload, list):
+                return payload
+            if isinstance(payload, dict):
+                for key in ("items", "results", "data", "employees"):
+                    value = payload.get(key)
+                    if isinstance(value, list):
+                        return value
+                logging.warning(f"Employees API returned dict payload, not list: keys={list(payload.keys())}")
+                return []
+            logging.warning(f"Employees API returned unsupported payload type: {type(payload)}")
+            return []
+        logging.warning(f"Employees fetch failed with status={response.status_code}: {response.text}")
     except Exception as e:
         logging.error(f"Failed to fetch employees: {e}")
     return []
@@ -186,6 +202,8 @@ def get_officer_prompt_list(officers):
     if not officers:
         return ["Me", "Others"]
     for e in officers:
+        if not isinstance(e, dict):
+            continue
         name = e.get('name', '').strip()
         disp = (e.get('display_username') or e.get('display_name') or "").strip()
         if name and disp:
@@ -197,6 +215,8 @@ def get_officer_prompt_list(officers):
 
 
 def _officer_display_value(officer: dict) -> str:
+    if not isinstance(officer, dict):
+        return ""
     return (officer.get('display_username') or officer.get('display_name') or "").strip()
 
 
@@ -212,12 +232,16 @@ def normalize_to_display_name(officers, assigned_name):
     
     # 1. Check if it's already a Display Name (Direct Match)
     for e in officers:
+        if not isinstance(e, dict):
+            continue
         disp = (e.get('display_username') or e.get('display_name') or "").strip()
         if disp.lower() == target:
             return disp
             
     # 2. Check if it's a Casual Name (Mapping Match)
     for e in officers:
+        if not isinstance(e, dict):
+            continue
         name = e.get('name', '').strip()
         if name.lower() == target:
             return e.get('display_username') or e.get('display_name') or name
@@ -225,6 +249,8 @@ def normalize_to_display_name(officers, assigned_name):
     # 3. Fuzzy/Token Match (Handle "Dmf Aditya" vs "Aditya DMF")
     target_tokens = set(target.split())
     for e in officers:
+        if not isinstance(e, dict):
+            continue
         # Check Display Name Tokens
             disp = (e.get('display_username') or e.get('display_name') or "").strip()
             disp_tokens = set(disp.lower().split())
@@ -241,6 +267,8 @@ def normalize_to_display_name(officers, assigned_name):
     # Only if target matches a significant part of the name
     if len(target) > 3:
         for e in officers:
+             if not isinstance(e, dict):
+                 continue
              disp = (e.get('display_username') or e.get('display_name') or "").strip()
              if target in disp.lower():
                  return disp
@@ -262,6 +290,8 @@ def resolve_employee_assignment(officers, assigned_name):
         return "", None
 
     for e in officers:
+        if not isinstance(e, dict):
+            continue
         disp = _officer_display_value(e).lower()
         name = (e.get('name') or "").strip().lower()
         if target == disp or target == name:
@@ -470,10 +500,10 @@ def _deterministic_reply_intent(user_text: str) -> dict | None:
 
     # Task name / description updates
     name_patterns = [
-        r"change\s+(?:the\s+)?task\s+name\s+to\s+(.+)$",
+        r"chang(?:e|ed)\s+(?:the\s+)?task\s+name\s+to\s+(.+)$",
         r"rename\s+(?:the\s+)?task\s+to\s+(.+)$",
         r"rename\s+to\s+(.+)$",
-        r"change\s+name\s+to\s+(.+)$",
+        r"chang(?:e|ed)\s+name\s+to\s+(.+)$",
         r"set\s+task\s+name\s+as\s+(.+)$",
     ]
     for pat in name_patterns:
@@ -486,7 +516,7 @@ def _deterministic_reply_intent(user_text: str) -> dict | None:
 
     # Generic fallback phrase if clearly intended as task rename.
     if not fields.get("description") and not fields.get("assigned_agency") and not fields.get("deadline_date"):
-        m = re.search(r"^change\s+to\s+(.+)$", text, flags=re.IGNORECASE)
+        m = re.search(r"^chang(?:e|ed)\s+to\s+(.+)$", text, flags=re.IGNORECASE)
         if m:
             new_name = _normalize_text_spaces(m.group(1)).rstrip(".,;:")
             if new_name:
@@ -498,13 +528,42 @@ def _deterministic_reply_intent(user_text: str) -> dict | None:
 
 # --- CORE LOGIC ---
 
-async def process_task_creation(update: Update, task_data: dict, officers_list: list, suppress_error: bool = False):
+def _resize_image_to_png(src_path: str, max_size: int = 1400) -> str | None:
+    try:
+        img = Image.open(src_path)
+        img = img.convert("RGB")
+        img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        out_path = f"{src_path}.png"
+        img.save(out_path, format="PNG", optimize=True)
+        return out_path
+    except Exception as exc:
+        logging.warning(f"Image resize failed: {exc}")
+        return None
+
+
+def _upload_task_image(task_id: int, image_path: str) -> str | None:
+    try:
+        url = _tasks_image_upload_url(task_id)
+        with open(image_path, "rb") as f:
+            res = requests.post(url, files={"image": f}, timeout=20)
+        if res.status_code == 200:
+            payload = res.json() or {}
+            return payload.get("image_url") or None
+        logging.warning(f"Task image upload failed ({res.status_code}): {res.text}")
+        return None
+    except Exception as exc:
+        logging.warning(f"Task image upload exception: {exc}")
+        return None
+
+
+async def process_task_creation(update: Update, task_data: dict, officers_list: list, suppress_error: bool = False, local_image_path: str | None = None):
     """Helper to push task to API and handle notification flow."""
     try:
         response = requests.post(API_URL, json=task_data, timeout=12)
         
         if response.status_code == 200 or response.status_code == 201:
             created_task = response.json()
+            task_id = created_task.get("id")
             assigned_to = created_task.get('assigned_employee_name') or created_task.get('assigned_agency')
             task_name = (created_task.get('description') or task_data.get('description') or '').strip() or 'No description'
             
@@ -515,9 +574,17 @@ async def process_task_creation(update: Update, task_data: dict, officers_list: 
                 f"👤 **Assigned:** {assigned_to or 'Unassigned'}\n"
                 f"📅 **Deadline:** {created_task.get('deadline_date') or 'No Deadline'}"
             )
-            # Add attachment link if present
-            if task_data.get('attachment_data'):
-                reply += f"\n📎 **Attachment:** [View File]({task_data['attachment_data']})"
+
+            if local_image_path and task_id:
+                resized = _resize_image_to_png(local_image_path, max_size=1400)
+                if resized:
+                    uploaded_url = _upload_task_image(int(task_id), resized)
+                    try:
+                        os.remove(resized)
+                    except Exception:
+                        pass
+                    if uploaded_url:
+                        reply += "\n🖼️ **Image:** Saved to dashboard"
 
             await update.message.reply_text(reply, parse_mode='Markdown')
             
@@ -536,7 +603,7 @@ async def process_task_creation(update: Update, task_data: dict, officers_list: 
          return False
 
 
-async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = False, file_path: str = None, attachment_data: str = None):
+async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = False, file_path: str = None, attachment_data: str = None, local_image_path: str = None):
     """Unified logic for voice and text processing."""
     today_str = datetime.date.today().strftime("%Y-%m-%d")
     year_str = datetime.date.today().year
@@ -663,7 +730,7 @@ async def handle_core_logic(update: Update, prompt_input: str, is_voice: bool = 
                     task_data['description'] = original_desc  # Dictated text should appear in Task/Description
                     
                     show_error = (attempt == 5)
-                    if await process_task_creation(update, task_data, raw_officers, suppress_error=not show_error):
+                    if await process_task_creation(update, task_data, raw_officers, suppress_error=not show_error, local_image_path=local_image_path):
                         success = True
                         break
                     # If failed, loop continues
@@ -748,20 +815,23 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_path = f"temp_doc_{user_id}_{int(datetime.datetime.now().timestamp())}{file_ext}"
         await file_obj.download_to_drive(file_path)
         
-        # Upload to Google Drive (High Res)
-        await update.message.reply_text("☁️ Uploading to Drive...")
-        original_name = f"Task_Doc_{user_id}_{int(datetime.datetime.now().timestamp())}{file_ext}"
-        drive_link = upload_to_drive(file_path, original_name, mime_type)
-        
         attachment_data = None
-        if drive_link:
-             attachment_data = drive_link
-             await update.message.reply_text(f"✅ Uploaded: [Link]({drive_link})", parse_mode='Markdown')
+        local_image_path = None
+        if mime_type.startswith("image/"):
+            local_image_path = file_path
         else:
-             await update.message.reply_text("⚠️ Drive Upload Failed. Task will be created without attachment.")
-        
+            # Optional: keep Drive upload for PDFs as a fallback reference.
+            await update.message.reply_text("☁️ Uploading to Drive...")
+            original_name = f"Task_Doc_{user_id}_{int(datetime.datetime.now().timestamp())}{file_ext}"
+            drive_link = upload_to_drive(file_path, original_name, mime_type)
+            if drive_link:
+                attachment_data = drive_link
+                await update.message.reply_text(f"✅ Uploaded: [Link]({drive_link})", parse_mode='Markdown')
+            else:
+                await update.message.reply_text("⚠️ Drive Upload Failed. Task will be created without attachment.")
+
         caption = update.message.caption or ""
-        await handle_core_logic(update, caption, is_voice=True, file_path=file_path, attachment_data=attachment_data)
+        await handle_core_logic(update, caption, is_voice=True, file_path=file_path, attachment_data=attachment_data, local_image_path=local_image_path)
         
     except Exception as e:
         await update.message.reply_text(f"❌ File Error: {e}")
@@ -784,7 +854,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles replies to bot messages for Edit/Delete."""
     user_text = update.message.text
-    original_text = update.message.reply_to_message.text
+    original_text = (
+        (update.message.reply_to_message.text if update.message.reply_to_message else None)
+        or (update.message.reply_to_message.caption if update.message.reply_to_message else None)
+        or ""
+    )
     
     # 1. Extract Task identity (new format Task ID, old format Ref).
     legacy_ref, task_number = _extract_task_identifiers_from_message(original_text)
@@ -882,8 +956,8 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text("❓ I didn't understand that modification.")
             
     except Exception as e:
-        logging.error(f"Reply Error: {e}")
-        await update.message.reply_text("❌ Failed to process update. Try specifying 'change name to X'.")
+        logging.exception(f"Reply Error: {e}")
+        await update.message.reply_text("❌ Failed to process update. Please use: delete | change task name to X | change assigned to Y | deadline to DD/MM/YYYY")
 
 
 async def notification_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
