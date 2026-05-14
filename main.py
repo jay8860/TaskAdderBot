@@ -1028,25 +1028,20 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
             resp = requests.put(put_url, json=updates, timeout=12)
             
             if resp.status_code == 200:
-                # Fetch fresh data to match DB exactly
-                get_url = f"{API_URL}{task_db_id}"
-                fresh_resp = requests.get(get_url, timeout=12)
-                if fresh_resp.status_code == 200:
-                    updated_task = fresh_resp.json()
-                else:
-                    updated_task = resp.json() # Fallback
+                # Do not depend on JSON bodies (some deployments return empty/HTML on success).
+                # Prefer echoing the user's requested changes.
+                new_name = (updates.get("description") or "").strip()
+                new_agency = (updates.get("assigned_agency") or "").strip()
+                new_deadline = (updates.get("deadline_date") or "").strip()
 
-                task_name_disp = updated_task.get('description') or "-"
-                task_id_disp = updated_task.get('task_number') or task_display_id
-                agency_disp = updated_task.get('assigned_agency') or "Unassigned"
-                deadline_disp = updated_task.get('deadline_date') or "No Deadline"
-                
-                await update.message.reply_text(
-                    f"📝 **Task {task_id_disp} Updated!**\n"
-                    f"📌 **Task Name:** {task_name_disp}\n"
-                    f"👤 **Agency:** {agency_disp}\n"
-                    f"📅 **Deadline:** {deadline_disp}"
-                )
+                lines = [f"📝 **Task {task_display_id} Updated!**"]
+                if new_name:
+                    lines.append(f"📌 **Task Name:** {new_name}")
+                if new_agency:
+                    lines.append(f"👤 **Assigned:** {new_agency}")
+                if new_deadline:
+                    lines.append(f"📅 **Deadline:** {new_deadline}")
+                await update.message.reply_text("\n".join(lines))
             else:
                 await update.message.reply_text(f"❌ Update Failed ({resp.status_code}): {resp.text}")
                 
