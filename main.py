@@ -922,7 +922,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles replies to bot messages for Edit/Delete."""
-    user_text = update.message.text
+    user_text = update.message.text or ""
     original_text = (
         (update.message.reply_to_message.text if update.message.reply_to_message else None)
         or (update.message.reply_to_message.caption if update.message.reply_to_message else None)
@@ -1038,13 +1038,7 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
     except Exception as e:
         logging.exception(f"Reply Error: {e}")
-        await update.message.reply_text(
-            "❌ Failed to process update.\n"
-            "Try replying with one of these:\n"
-            "- Change task name to <text>\n"
-            "- Assign to <person/role>\n"
-            "- Deadline to DD/MM/YYYY"
-        )
+        await update.message.reply_text(f"❌ Failed to process update: {e}")
 
 
 async def notification_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
