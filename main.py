@@ -921,14 +921,18 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if 'file_path' in locals() and os.path.exists(file_path): os.remove(file_path)
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.reply_to_message and update.message.reply_to_message.from_user.is_bot:
-        # Assuming handle_reply_logic is not strictly needed for this task or can be omitted if not fully defined in context
-        # But I should probably keep it if it was there. 
-        # I'll add a concise version or assume handle_reply_logic handles edits.
-        # Ideally I should have copied it. I will implement a minimal placeholder or try to reuse if defined.
-        # Re-implementing handle_reply_logic briefly.
-        await handle_reply_logic(update, context)
-        return
+    # Treat replies as edits when the replied-to message contains a task identifier,
+    # even if the reply target is not the bot (users often reply to their own message bubble).
+    if update.message.reply_to_message:
+        replied_text = (
+            update.message.reply_to_message.text
+            or update.message.reply_to_message.caption
+            or ""
+        )
+        legacy_ref, task_number = _extract_task_identifiers_from_message(replied_text)
+        if legacy_ref or task_number:
+            await handle_reply_logic(update, context)
+            return
 
     await update.message.reply_text("✍️ Processing...")
     await handle_core_logic(update, update.message.text)
