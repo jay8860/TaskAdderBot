@@ -127,7 +127,17 @@ async def handle_check_command(update: Update, query_text: str) -> None:
         if resp.status_code != 200:
             await update.message.reply_text(f"⚠️ Couldn't fetch tasks ({resp.status_code}).")
             return
-        tasks = resp.json() if resp.content else []
+        if not resp.content:
+            tasks = []
+        else:
+            try:
+                tasks = resp.json()
+            except Exception:
+                # Common in prod when upstream returns HTML/auth page despite 200
+                body = (resp.text or "").strip()
+                snippet = body[:160].replace("\n", " ")
+                await update.message.reply_text(f"⚠️ Task fetch error: invalid JSON response. Body: {snippet!r}")
+                return
     except Exception as exc:
         await update.message.reply_text(f"⚠️ Task fetch error: {exc}")
         return
