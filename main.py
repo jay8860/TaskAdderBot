@@ -416,10 +416,15 @@ def _extract_task_identifiers_from_message(message_text: str) -> tuple[str | Non
     text = (message_text or "").replace("*", "")
     legacy_ref = None
     task_number = None
+    db_id = None
 
     ref_match = re.search(r"(?:Ref|Task Ref)\s*:?\s*#?(\d+)", text, flags=re.IGNORECASE)
     if ref_match:
         legacy_ref = ref_match.group(1).strip()
+
+    db_match = re.search(r"(?:DB\s*ID|DBID|Database\s*ID)\s*:?\s*#?(\d+)", text, flags=re.IGNORECASE)
+    if db_match:
+        db_id = db_match.group(1).strip()
 
     id_match = re.search(r"Task ID\s*:?\s*([A-Za-z0-9._-]+)", text, flags=re.IGNORECASE)
     if id_match:
@@ -431,6 +436,9 @@ def _extract_task_identifiers_from_message(message_text: str) -> tuple[str | Non
         if tn_match:
             task_number = tn_match.group(1).strip()
 
+    # Prefer DB id when present.
+    if db_id and str(db_id).isdigit():
+        return db_id, task_number
     return legacy_ref, task_number
 
 
@@ -448,7 +456,11 @@ def _resolve_task_db_id(legacy_ref: str | None, task_number: str | None) -> tupl
             logging.error(f"Task lookup failed ({resp.status_code}): {resp.text}")
             return None, task_number
 
-        payload = resp.json()
+        try:
+            payload = resp.json()
+        except Exception as exc:
+            logging.error(f"Task lookup JSON parse failed ({resp.status_code}): {exc} body={resp.text[:200]!r}")
+            return None, task_number
         tasks = payload if isinstance(payload, list) else []
         if not tasks:
             return None, task_number
@@ -634,6 +646,7 @@ async def process_task_creation(update: Update, task_data: dict, officers_list: 
             reply = (
                 f"✅ **Task Created!**\n\n"
                 f"🆔 **Task ID:** {created_task.get('task_number')}\n"
+                f"🗄️ **DB ID:** {created_task.get('id')}\n"
                 f"📝 **Task Name:** {task_name}\n"
                 f"👤 **Assigned:** {assigned_to or 'Unassigned'}\n"
                 f"📅 **Deadline:** {created_task.get('deadline_date') or 'No Deadline'}"
