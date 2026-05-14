@@ -72,8 +72,12 @@ def _tasks_image_upload_url(task_id: int) -> str:
 
 
 def _tasks_list_url() -> str:
-    # Use canonical tasks endpoint (always under /api/tasks) even if env vars are mis-set.
-    return f"{API_BASE_URL}/tasks"
+    # Prefer the explicit tasks endpoint when available.
+    raw = (TASKS_API_URL or "").strip()
+    if raw:
+        return raw.rstrip("/")
+    # Fallback: use canonical tasks endpoint (expected under /api/tasks).
+    return f"{API_BASE_URL}/tasks".rstrip("/")
 
 
 def _short_task_line(task: dict) -> str:
@@ -124,7 +128,8 @@ async def handle_check_command(update: Update, query_text: str) -> None:
             "sort_dir": "asc",
             "t": str(int(datetime.datetime.now().timestamp())),
         }
-        resp = requests.get(_tasks_list_url(), params=params, timeout=12)
+        url = _tasks_list_url()
+        resp = requests.get(url, params=params, timeout=12)
         if resp.status_code != 200:
             await update.message.reply_text(f"⚠️ Couldn't fetch tasks ({resp.status_code}).")
             return
@@ -137,7 +142,7 @@ async def handle_check_command(update: Update, query_text: str) -> None:
                 # Common in prod when upstream returns HTML/auth page despite 200
                 body = (resp.text or "").strip()
                 snippet = body[:160].replace("\n", " ")
-                await update.message.reply_text(f"⚠️ Task fetch error: invalid JSON response. Body: {snippet!r}")
+                await update.message.reply_text(f"⚠️ Task fetch error (url={url}): invalid JSON response. Body: {snippet!r}")
                 return
     except Exception as exc:
         await update.message.reply_text(f"⚠️ Task fetch error: {exc}")
