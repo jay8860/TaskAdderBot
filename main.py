@@ -88,8 +88,10 @@ def _tasks_list_url() -> str:
 def _short_task_line(task: dict) -> str:
     tn = (task.get("task_number") or "").strip()
     desc = _normalize_text_spaces(task.get("description") or "").strip()
-    if len(desc) > 110:
-        desc = desc[:107].rstrip() + "..."
+    # Telegram can handle long messages; keep descriptions mostly intact.
+    # Hard cap to avoid hitting message limits on very long tasks.
+    if len(desc) > 320:
+        desc = desc[:317].rstrip() + "..."
     if tn and desc:
         return f"- {tn}: {desc}"
     if desc:
