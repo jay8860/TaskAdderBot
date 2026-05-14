@@ -300,6 +300,44 @@ def resolve_employee_assignment(officers, assigned_name):
     return display_name, None
 
 
+def resolve_employee_assignment_from_free_text(officers: list, raw_text: str):
+    """
+    More forgiving resolver for edits like "DPO Tanuja" or "Assign to Tanuja".
+    Returns (assigned_agency_display, assigned_employee_id)
+    """
+    text = _normalize_text_spaces(raw_text or "")
+    if not text:
+        return "", None
+
+    # First try existing strict resolver.
+    disp, emp_id = resolve_employee_assignment(officers, text)
+    if emp_id:
+        return disp, emp_id
+
+    target_tokens = [t for t in re.split(r"[^a-z0-9]+", text.lower()) if t]
+    if not target_tokens:
+        return disp, emp_id
+
+    best = None
+    best_score = 0
+    for off in officers or []:
+        if not isinstance(off, dict) or not off.get("id"):
+            continue
+        blob = _designation_blob(off)
+        score = 0
+        for tok in target_tokens:
+            if tok in blob:
+                score += 1
+        if score > best_score:
+            best = off
+            best_score = score
+
+    if best and best_score >= 1:
+        return (_officer_display_value(best) or text), best.get("id")
+
+    return disp, emp_id
+
+
 def _normalize_text_for_match(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
 
@@ -549,7 +587,7 @@ def _deterministic_reply_intent(user_text: str) -> dict | None:
         r"allocate\s+(?:it|this|task)?\s*to\s+(.+)$",
     ]
     for pat in assign_patterns:
-        m = re.search(pat, lowered, flags=re.IGNORECASE)
+        m = re.search(pat, text, flags=re.IGNORECASE)
         if m:
             candidate = _normalize_text_spaces(m.group(1)).rstrip(".,;:")
             if candidate:
@@ -1014,7 +1052,7 @@ async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # Normalize Assigned Agency if present
             if "assigned_agency" in updates:
                 raw_officers = fetch_raw_officers()
-                assigned_agency, assigned_employee_id = resolve_employee_assignment(raw_officers, updates["assigned_agency"])
+                assigned_agency, assigned_employee_id = resolve_employee_assignment_from_free_text(raw_officers, updates["assigned_agency"])
                 if not assigned_employee_id:
                     inferred_disp, inferred_id = infer_employee_by_topic(raw_officers, updates.get("description") or "")
                     if inferred_id:
