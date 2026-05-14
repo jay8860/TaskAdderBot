@@ -72,7 +72,8 @@ def _tasks_image_upload_url(task_id: int) -> str:
 
 
 def _tasks_list_url() -> str:
-    return API_URL.rstrip("/")
+    # Use canonical tasks endpoint (always under /api/tasks) even if env vars are mis-set.
+    return f"{API_BASE_URL}/tasks"
 
 
 def _short_task_line(task: dict) -> str:
