@@ -75,9 +75,14 @@ def _tasks_list_url() -> str:
     # Prefer the explicit tasks endpoint when available.
     raw = (TASKS_API_URL or "").strip()
     if raw:
-        return raw.rstrip("/")
+        # FastAPI route is mounted at /api/tasks/ (trailing slash). Without it,
+        # some deployments may serve a static HTML page at /api/tasks.
+        url = raw.rstrip("/")
+        if not url.endswith("/"):
+            url = url + "/"
+        return url
     # Fallback: use canonical tasks endpoint (expected under /api/tasks).
-    return f"{API_BASE_URL}/tasks".rstrip("/")
+    return f"{API_BASE_URL}/tasks/".rstrip("/") + "/"
 
 
 def _short_task_line(task: dict) -> str:
