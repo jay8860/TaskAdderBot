@@ -70,6 +70,70 @@ API_URL = TASKS_API_URL  # backward-compatible alias used throughout the file
 def _tasks_image_upload_url(task_id: int) -> str:
     return f"{API_BASE_URL}/tasks/{task_id}/image"
 
+
+def _tasks_list_url() -> str:
+    return API_URL.rstrip("/")
+
+
+def _short_task_line(task: dict) -> str:
+    tn = (task.get("task_number") or "").strip()
+    desc = _normalize_text_spaces(task.get("description") or "").strip()
+    if len(desc) > 110:
+        desc = desc[:107].rstrip() + "..."
+    if tn and desc:
+        return f"- {tn}: {desc}"
+    if desc:
+        return f"- {desc}"
+    if tn:
+        return f"- {tn}"
+    return "- (unnamed task)"
+
+
+def _build_pending_tasks_message(person_label: str, tasks: list[dict]) -> str:
+    rows = [t for t in (tasks or []) if isinstance(t, dict)]
+    if not rows:
+        return f"✅ No pending tasks found for {person_label}."
+
+    # Keep it brief and organic.
+    max_items = 12
+    lines = [f"Pending tasks for {person_label}:"]
+    for t in rows[:max_items]:
+        lines.append(_short_task_line(t))
+    remaining = len(rows) - max_items
+    if remaining > 0:
+        lines.append(f"...and {remaining} more.")
+    return "\n".join(lines)
+
+
+async def handle_check_command(update: Update, query_text: str) -> None:
+    raw = _normalize_text_spaces(query_text)
+    if not raw:
+        await update.message.reply_text("Type: check <name/designation>")
+        return
+
+    officers = fetch_raw_officers()
+    display, emp_id = resolve_employee_assignment_from_free_text(officers, raw)
+    person_label = display or raw
+
+    try:
+        params = {
+            "agency": person_label,
+            "status": "Pending,Overdue",
+            "sort_by": "deadline_date",
+            "sort_dir": "asc",
+            "t": str(int(datetime.datetime.now().timestamp())),
+        }
+        resp = requests.get(_tasks_list_url(), params=params, timeout=12)
+        if resp.status_code != 200:
+            await update.message.reply_text(f"⚠️ Couldn't fetch tasks ({resp.status_code}).")
+            return
+        tasks = resp.json() if resp.content else []
+    except Exception as exc:
+        await update.message.reply_text(f"⚠️ Task fetch error: {exc}")
+        return
+
+    await update.message.reply_text(_build_pending_tasks_message(person_label, tasks))
+
 # Configure Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -972,8 +1036,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_reply_logic(update, context)
             return
 
+    raw_text = update.message.text or ""
+    normalized = _normalize_text_spaces(raw_text)
+    if normalized.lower().startswith("check "):
+        await handle_check_command(update, normalized[6:])
+        return
+
     await update.message.reply_text("✍️ Processing...")
-    await handle_core_logic(update, update.message.text)
+    await handle_core_logic(update, raw_text)
 
 async def handle_reply_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles replies to bot messages for Edit/Delete."""
